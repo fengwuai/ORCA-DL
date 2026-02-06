@@ -24,3 +24,6 @@ try.ipynb
 
 run_jupyter.sh
 
+# pixi environments
+.pixi/*
+!.pixi/config.toml
