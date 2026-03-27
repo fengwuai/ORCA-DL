@@ -8,10 +8,14 @@ ORCA-DL GODAS 数据推理脚本
 
 使用方式：
     pixi run -e model python predict/inference.py 2025-12
+    pixi run -e model python predict/inference.py 2025-12 --source psl
 
 参数：
     input_date: 初始化月份，格式为 YYYY-MM（如 2025-12）
                 该月份的 GODAS 数据必须已发布
+    --source:   数据源选择（默认 cpc）
+                cpc - CPC FTP 单月 GRIB 文件（推荐，下载更快）
+                psl - PSL 按变量分年 NetCDF 文件
 
 输出：
     ./output/predictions/orca_dl_prediction_2025_12_24months.nc
@@ -39,6 +43,7 @@ ORCA-DL GODAS 数据推理脚本
 import os
 import sys
 import json
+import argparse
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -62,6 +67,18 @@ STAT_DIR = "./stat"
 GRID_FILE = "./grid"
 ZAXIS_FILE = "./zaxis.txt"
 GODAS_BASE_URL = "https://downloads.psl.noaa.gov/Datasets/godas"
+GODAS_CPC_URL = "https://ftp.cpc.ncep.noaa.gov/godas/monthly"
+
+# GRIB1 变量代码映射（CPC 数据源用）
+GRIB_CODES = {
+    'pottmp': 13,
+    'salt': 88,
+    'ucur': 49,
+    'vcur': 50,
+    'sshg': 198,
+    'uflx': 124,
+    'vflx': 125,
+}
 
 # 推理配置
 PREDICT_STEPS = 24   # 预测月数
@@ -217,7 +234,41 @@ def download_all_variables(year: int, month: int, output_dir: str) -> Dict[str, 
     return file_paths
 
 
-# ============ 数据预处理（CDO）============
+def download_godas_grib(year: int, month: int, output_dir: str) -> str:
+    """
+    从 CPC 下载单月 GODAS GRIB 文件
+
+    Args:
+        year: 年份
+        month: 月份（1-12）
+        output_dir: 输出目录
+
+    Returns:
+        GRIB 文件路径
+    """
+    filename = f"godas.M.{year}{month:02d}.grb"
+    url = f"{GODAS_CPC_URL}/{filename}"
+    output_file = os.path.join(output_dir, filename)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    if os.path.exists(output_file):
+        print(f"  - {filename}: 文件已存在，跳过下载")
+        return output_file
+
+    try:
+        print(f"  - {filename}: 正在下载... ", end="", flush=True)
+        urlretrieve(url, output_file)
+        print("完成")
+        return output_file
+    except HTTPError as e:
+        if e.code == 404:
+            raise FileNotFoundError(
+                f"GODAS GRIB 数据不存在：{url}\n"
+                f"请确认 {year}-{month:02d} 的数据已发布"
+            )
+        else:
+            raise RuntimeError(f"下载失败：{url}，错误码：{e.code}")
 
 def run_cdo_command(cmd: list, description: str):
     """
@@ -321,6 +372,64 @@ def preprocess_all_variables(raw_dir: str, processed_dir: str, year: int, month:
         output_file = os.path.join(processed_dir, f"{var}.nc")
         print(f"  - 处理 2D 变量：{var}")
         preprocess_2d_variable(input_file, output_file, year, month, var)
+
+
+def preprocess_3d_from_grib(grib_file: str, output_nc: str, var_name: str):
+    """
+    从 GRIB 文件预处理 3D 变量（按 code 提取 + 垂直插值 + 水平插值）
+    """
+    levels = ",".join(map(str, DEPTH_LEVELS))
+    code = GRIB_CODES[var_name]
+    # -f nc4: GRIB 输入默认输出 GRIB，强制输出 NetCDF4
+    # setname: GRIB 中变量名为 varXX，重命名以匹配 prepare_model_input 中的读取逻辑
+    cmd = [
+        "cdo", "-f", "nc4", "-b", "f64",
+        f"setname,{var_name}",
+        "-remapbil," + GRID_FILE,
+        "-setzaxis," + ZAXIS_FILE,
+        "-intlevel," + levels,
+        f"-selcode,{code}",
+        grib_file,
+        output_nc
+    ]
+    run_cdo_command(cmd, f"GRIB 3D 变量插值：{var_name}")
+
+
+def preprocess_2d_from_grib(grib_file: str, output_nc: str, var_name: str):
+    """
+    从 GRIB 文件预处理 2D 变量（按 code 提取 + 水平插值）
+    """
+    code = GRIB_CODES[var_name]
+    cmd = [
+        "cdo", "-f", "nc4", "-b", "f64",
+        f"setname,{var_name}",
+        "-remapbil," + GRID_FILE,
+        f"-selcode,{code}",
+        grib_file,
+        output_nc
+    ]
+    run_cdo_command(cmd, f"GRIB 2D 变量插值：{var_name}")
+
+
+def preprocess_all_from_grib(grib_file: str, processed_dir: str):
+    """
+    从单个 GRIB 文件预处理所有变量
+
+    Args:
+        grib_file: GRIB 文件路径
+        processed_dir: 预处理输出目录
+    """
+    os.makedirs(processed_dir, exist_ok=True)
+
+    for var in GODAS_VARS_3D:
+        output_file = os.path.join(processed_dir, f"{var}.nc")
+        print(f"  - 处理 3D 变量：{var}")
+        preprocess_3d_from_grib(grib_file, output_file, var)
+
+    for var in GODAS_VARS_2D + GODAS_VARS_ATMO:
+        output_file = os.path.join(processed_dir, f"{var}.nc")
+        print(f"  - 处理 2D 变量：{var}")
+        preprocess_2d_from_grib(grib_file, output_file, var)
 
 
 # ============ 数据归一化 ============
@@ -729,12 +838,13 @@ def get_var_description(var: str) -> str:
 
 # ============ 主流程 ============
 
-def main(input_date: str):
+def main(input_date: str, source: str = "cpc"):
     """
     主推理流程
 
     Args:
         input_date: 格式为 YYYY-MM，如 "2025-12"
+        source: 数据源，"cpc"（CPC GRIB，默认）或 "psl"（PSL NetCDF）
     """
     print("=" * 60)
     print("ORCA-DL 海洋状态预测系统")
@@ -744,6 +854,7 @@ def main(input_date: str):
     print(f"\n[1/8] 解析输入日期：{input_date}")
     year, month = parse_date(input_date)
     print(f"✓ 起始日期：{year} 年 {month} 月")
+    print(f"✓ 数据源：{source.upper()}")
 
     # 2. 检查依赖
     print("\n[2/8] 检查依赖项...")
@@ -751,27 +862,32 @@ def main(input_date: str):
 
     # 3. 检查 GPU 可用性
     print("\n[3/8] 检查计算设备...")
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"✓ 使用 GPU：{torch.cuda.get_device_name(0)}")
-        print(f"  显存：{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-    else:
-        device = torch.device("cpu")
-        print("⚠ GPU 不可用，使用 CPU（推理速度会较慢）")
+    # if torch.cuda.is_available():
+    #     device = torch.device("cuda")
+    #     print(f"✓ 使用 GPU：{torch.cuda.get_device_name(0)}")
+    #     print(f"  显存：{torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
+    # else:
+    device = torch.device("cpu")
+    print("⚠ GPU 不可用，使用 CPU（推理速度会较慢）")
 
-    # 4. 创建临时目录并执行推理
+    # 4. 下载数据
     print(f"\n[4/8] 下载 GODAS 数据（{year}-{month:02d}）...")
-
-    # 使用持久化的 GODAS 原始数据目录
     os.makedirs(GODAS_RAW_DIR, exist_ok=True)
-    download_all_variables(year, month, GODAS_RAW_DIR)
+
+    if source == "cpc":
+        grib_file = download_godas_grib(year, month, GODAS_RAW_DIR)
+    else:
+        download_all_variables(year, month, GODAS_RAW_DIR)
 
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_dl_") as tmp_dir:
         processed_dir = os.path.join(tmp_dir, "processed")
 
         # 5. 预处理数据
         print(f"\n[5/8] 预处理数据（CDO 插值）...")
-        preprocess_all_variables(GODAS_RAW_DIR, processed_dir, year, month)
+        if source == "cpc":
+            preprocess_all_from_grib(grib_file, processed_dir)
+        else:
+            preprocess_all_variables(GODAS_RAW_DIR, processed_dir, year, month)
 
         # 6. 准备模型输入
         print(f"\n[6/8] 准备模型输入（归一化）...")
@@ -828,13 +944,26 @@ def main(input_date: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("使用方式：pixi run -e model python predict/inference.py YYYY-MM")
-        print("示例：pixi run -e model python predict/inference.py 2025-12")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="ORCA-DL 海洋状态预测系统",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "示例：\n"
+            "  pixi run -e model python predict/inference.py 2025-12\n"
+            "  pixi run -e model python predict/inference.py 2025-12 --source psl"
+        ),
+    )
+    parser.add_argument("input_date", help="初始化月份，格式 YYYY-MM（如 2025-12）")
+    parser.add_argument(
+        "--source",
+        choices=["cpc", "psl"],
+        default="cpc",
+        help="数据源：cpc（CPC GRIB，默认）或 psl（PSL NetCDF）",
+    )
+    args = parser.parse_args()
 
     try:
-        main(sys.argv[1])
+        main(args.input_date, source=args.source)
     except Exception as e:
         print(f"\n错误：{e}", file=sys.stderr)
         sys.exit(1)
