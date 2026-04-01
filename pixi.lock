@@ -272,8 +272,8 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/19/99/504af0c961e6b6a9494447b3d83d72b79969e9ac17b89394ae343583fb0c/timm-0.6.11-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/94/60/ff26cce378023624ffcad91edaa4871f561d6ba7295185c45037ddba80e2/tokenizers-0.13.3-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/52/c2/323619638a1154da0a134297a4cc1c46df4142e9fd553370301937e21fcb/torch-1.12.0-cp310-cp310-manylinux1_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/41/76/bf1a99b7dc4f99cde9e19a7325aa2a09395fc11d74b9e171c6e105742938/torchvision-0.13.0-cp310-cp310-manylinux1_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/ca/74/7342c7f21449557a8263c925071a55081edd7e9b641404cfe31d6fb71d3b/torch-1.12.1-cp310-cp310-manylinux1_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/03/bb/8d6aade7c39bbc55a75054fcbd6c3292f080d05c7d9cff092f2813a65c10/torchvision-0.13.1-cp310-cp310-manylinux1_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c0/ab/bd9ba7f84c509c8b377628bc66696d52623e30c6c0830db3c78748eec4b4/tqdm-4.65.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d8/a7/a6ff727fd5d96d6625f4658944a2ae230f0c75743a9a117fbda013b03d3d/transformers-4.28.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl
@@ -330,8 +330,8 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/19/99/504af0c961e6b6a9494447b3d83d72b79969e9ac17b89394ae343583fb0c/timm-0.6.11-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/70/68/0a450e4dc488031b82fcd869840c542b86aad4a07d0eca1d7e9cbb9d742e/tokenizers-0.13.3-cp310-cp310-macosx_12_0_arm64.whl
-      - pypi: https://files.pythonhosted.org/packages/5a/e8/82c14c28360dafe02877b28c70218c8b6ca8a0f2fbb0515b2abd027ca251/torch-1.12.0-cp310-none-macosx_11_0_arm64.whl
-      - pypi: https://files.pythonhosted.org/packages/b9/46/065c71441c0bfb34914569f3728c4ecaa0364e65ed2f3adba98d84be568e/torchvision-0.14.1-cp310-cp310-macosx_11_0_arm64.whl
+      - pypi: https://files.pythonhosted.org/packages/2f/17/8b557dde1cdb5fbe82f90a3f192046c8e508f106456e12f17c87543e6a42/torch-1.12.1-cp310-none-macosx_11_0_arm64.whl
+      - pypi: https://files.pythonhosted.org/packages/7d/c3/9a60f71af06fd2364fb08be73645864d4caef715b8c9246d16386c7cec31/torchvision-0.13.1-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/c0/ab/bd9ba7f84c509c8b377628bc66696d52623e30c6c0830db3c78748eec4b4/tqdm-4.65.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d8/a7/a6ff727fd5d96d6625f4658944a2ae230f0c75743a9a117fbda013b03d3d/transformers-4.28.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl
@@ -5764,36 +5764,36 @@ packages:
   version: 2.4.1
   sha256: 0d85819802132122da43cb86656f8d1f8c6587d54ae7dcaf30e90533028b49fe
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/52/c2/323619638a1154da0a134297a4cc1c46df4142e9fd553370301937e21fcb/torch-1.12.0-cp310-cp310-manylinux1_x86_64.whl
+- pypi: https://files.pythonhosted.org/packages/2f/17/8b557dde1cdb5fbe82f90a3f192046c8e508f106456e12f17c87543e6a42/torch-1.12.1-cp310-none-macosx_11_0_arm64.whl
   name: torch
-  version: 1.12.0
-  sha256: 3322d33a06e440d715bb214334bd41314c94632d9a2f07d22006bf21da3a2be4
+  version: 1.12.1
+  sha256: 68104e4715a55c4bb29a85c6a8d57d820e0757da363be1ba680fa8cc5be17b52
   requires_dist:
   - typing-extensions
   requires_python: '>=3.7.0'
-- pypi: https://files.pythonhosted.org/packages/5a/e8/82c14c28360dafe02877b28c70218c8b6ca8a0f2fbb0515b2abd027ca251/torch-1.12.0-cp310-none-macosx_11_0_arm64.whl
+- pypi: https://files.pythonhosted.org/packages/ca/74/7342c7f21449557a8263c925071a55081edd7e9b641404cfe31d6fb71d3b/torch-1.12.1-cp310-cp310-manylinux1_x86_64.whl
   name: torch
-  version: 1.12.0
-  sha256: 13c7cca6b2ea3704d775444f02af53c5f072d145247e17b8cd7813ac57869f03
+  version: 1.12.1
+  sha256: 9c038662db894a23e49e385df13d47b2a777ffd56d9bcd5b832593fab0a7e286
   requires_dist:
   - typing-extensions
   requires_python: '>=3.7.0'
-- pypi: https://files.pythonhosted.org/packages/41/76/bf1a99b7dc4f99cde9e19a7325aa2a09395fc11d74b9e171c6e105742938/torchvision-0.13.0-cp310-cp310-manylinux1_x86_64.whl
+- pypi: https://files.pythonhosted.org/packages/03/bb/8d6aade7c39bbc55a75054fcbd6c3292f080d05c7d9cff092f2813a65c10/torchvision-0.13.1-cp310-cp310-manylinux1_x86_64.whl
   name: torchvision
-  version: 0.13.0
-  sha256: acb72a40e5dc0cd454d28514dbdd589a5057afd9bb5c785b87a54718b999bfa1
+  version: 0.13.1
+  sha256: ef5fe3ec1848123cd0ec74c07658192b3147dcd38e507308c790d5943e87b88c
   requires_dist:
   - typing-extensions
   - numpy
   - requests
-  - torch==1.12.0
+  - torch==1.12.1
   - pillow>=5.3.0,!=8.3.*
   - scipy ; extra == 'scipy'
   requires_python: '>=3.7'
-- pypi: https://files.pythonhosted.org/packages/b9/46/065c71441c0bfb34914569f3728c4ecaa0364e65ed2f3adba98d84be568e/torchvision-0.14.1-cp310-cp310-macosx_11_0_arm64.whl
+- pypi: https://files.pythonhosted.org/packages/7d/c3/9a60f71af06fd2364fb08be73645864d4caef715b8c9246d16386c7cec31/torchvision-0.13.1-cp310-cp310-macosx_11_0_arm64.whl
   name: torchvision
-  version: 0.14.1
-  sha256: 8d0766ea92affa7af248e327dd85f7c9cfdf51a57530b43212d4e1858548e9d7
+  version: 0.13.1
+  sha256: 08f592ea61836ebeceb5c97f4d7a813b9d7dc651bbf7ce4401563ccfae6a21fc
   requires_dist:
   - typing-extensions
   - numpy

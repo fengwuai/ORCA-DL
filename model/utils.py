@@ -75,7 +75,7 @@ def compute_mask_2d(H, W, window_size, shift_size, device):
 def compute_land_mask(lat_space, lon_space):
     lat = torch.linspace(*lat_space)
     lon = torch.linspace(*lon_space)
-    lat, lon = torch.meshgrid(lat, lon)
+    lat, lon = torch.meshgrid(lat, lon, indexing="ij")
     land_mask = torch.roll(torch.from_numpy(globe.is_ocean(lat, lon-180)), 180, dims=1)
     return land_mask
 
