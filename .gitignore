@@ -27,3 +27,10 @@ run_jupyter.sh
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+.DS_Store
+
+# local env files
+.env
+.env.*
+!.env.example

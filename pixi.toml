@@ -2,7 +2,7 @@
 authors = ["chansyawn <chansyawn@gmail.com>"]
 channels = ["conda-forge"]
 name = "ORCA-DL"
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-arm64"]
 version = "0.1.0"
 
 [tasks]
@@ -33,6 +33,20 @@ netcdf4 = ">=1.7.4, <2"
 [feature.exec.dependencies]
 cdo = ">=2.5.0,<3"
 
+[feature.orchestrator.dependencies]
+python = "3.10.*"
+
+[feature.orchestrator.pypi-dependencies]
+prefect = "==3.6.23"
+python-dotenv = ">=1.0,<2"
+
+[feature.orchestrator.tasks.pipeline-serve]
+cmd = "python orchestration/prefect_monthly_inference.py"
+
+[feature.orchestrator.tasks.pipeline-trigger]
+cmd = "python -m dotenv -f .env run -- prefect deployment run 海洋模型预测/海洋模型预测"
+
 [environments]
 model = ["model"]
 exec = ["exec"]
+orchestrator = ["orchestrator"]
