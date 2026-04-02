@@ -18,7 +18,7 @@ pixi install -e model
 cp .env.example .env
 ```
 
-然后编辑 `.env`，填入真实认证信息（含 `ARK_API_KEY`）。
+然后编辑 `.env`，填入真实认证信息（含 `ARK_API_KEY` 与 `US3_*`）。
 
 说明：
 - 脚本会通过 `python-dotenv` 自动读取仓库根目录 `.env`。
@@ -36,7 +36,8 @@ pixi run -e orchestrator pipeline-serve
 - 自动执行上个月数据
 - `model` 环境仅执行推理；报告分析与 PDF 生成在 `orchestrator` 环境执行
 - 推理临时文件统一在 `./tmp` 下通过 `TemporaryDirectory` 管理并自动清理
-- 最终仅保留报告：`output/reports/ocean_report_YYYY_MM.pdf`
+- 最终产物上传到：`s3://fengwu-public/szcx_ocean_report/YYYY-MM.pdf`
+- 本地 `output` 不保留当前流程生成的 PDF 文件
 - 报告模板固定来源：`demo/20260312000000-自动化海洋报告生成/report.md`
 
 ## 4. 手动运行

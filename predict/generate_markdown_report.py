@@ -9,16 +9,19 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import boto3
 from dotenv import load_dotenv
 from openai import OpenAI
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TMP_BASE_DIR = ROOT / "tmp"
-REPORT_DIR = ROOT / "output" / "reports"
+LEGACY_REPORT_DIR = ROOT / "output" / "reports"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
 PDF_MARGIN = "8mm"
+S3_BUCKET = "fengwu-public"
+S3_PREFIX = "szcx_ocean_report"
 REQUIRED_SECTIONS = [
     "## 1. 摘要",
     "## 2. 气候趋势分析：ENSO 演变",
@@ -68,10 +71,13 @@ def resolve_prediction_path(target_month: str) -> Path:
     return prediction_path
 
 
-def resolve_report_pdf_path(target_month: str) -> Path:
+def resolve_s3_key(target_month: str) -> str:
+    return f"{S3_PREFIX}/{target_month}.pdf"
+
+
+def resolve_legacy_local_pdf_path(target_month: str) -> Path:
     year, month = target_month.split("-")
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    return (REPORT_DIR / f"ocean_report_{year}_{month}.pdf").resolve()
+    return LEGACY_REPORT_DIR / f"ocean_report_{year}_{month}.pdf"
 
 
 def find_demo_dir() -> Path:
@@ -233,12 +239,37 @@ def convert_markdown_to_pdf(markdown_path: Path, output_pdf: Path, work_dir: Pat
         )
 
 
-def generate_pdf_report(target_month: str) -> Path:
+def upload_pdf_to_s3(pdf_path: Path, target_month: str) -> str:
+    public_key = os.getenv("US3_PUBLIC_KEY")
+    private_key = os.getenv("US3_PRIVATE_KEY")
+    end_point = os.getenv("US3_END_POINT")
+    if not public_key or not private_key or not end_point:
+        raise RuntimeError("缺少 US3 配置，请在 .env 中配置 US3_PUBLIC_KEY/US3_PRIVATE_KEY/US3_END_POINT")
+
+    key = resolve_s3_key(target_month)
+    client = boto3.client(
+        "s3",
+        endpoint_url=end_point,
+        aws_access_key_id=public_key,
+        aws_secret_access_key=private_key,
+    )
+    client.upload_file(
+        Filename=str(pdf_path),
+        Bucket=S3_BUCKET,
+        Key=key,
+        ExtraArgs={"ContentType": "application/pdf"},
+    )
+    legacy_pdf = resolve_legacy_local_pdf_path(target_month)
+    if legacy_pdf.is_file():
+        legacy_pdf.unlink()
+    return f"s3://{S3_BUCKET}/{key}"
+
+
+def generate_pdf_report(target_month: str) -> str:
     resolved_month = parse_target_month(target_month)
     load_root_env()
 
     input_netcdf = resolve_prediction_path(resolved_month)
-    output_pdf = resolve_report_pdf_path(resolved_month)
 
     demo_dir = find_demo_dir()
     template_path = demo_dir / "report.md"
@@ -273,14 +304,15 @@ def generate_pdf_report(target_month: str) -> Path:
         validate_report_markdown(markdown_text, image_links)
 
         temp_markdown_path.write_text(markdown_text + "\n", encoding="utf-8")
-        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        temp_pdf_path = temp_dir / f"{resolved_month}.pdf"
         convert_markdown_to_pdf(
             markdown_path=temp_markdown_path,
-            output_pdf=output_pdf,
+            output_pdf=temp_pdf_path,
             work_dir=temp_dir,
         )
+        return upload_pdf_to_s3(temp_pdf_path, resolved_month)
 
-    return output_pdf
+    raise RuntimeError("报告上传失败")
 
 
 def parse_args() -> argparse.Namespace:
@@ -291,8 +323,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    output_path = generate_pdf_report(target_month=args.target_month)
-    print(f"报告生成完成: {output_path}")
+    output_uri = generate_pdf_report(target_month=args.target_month)
+    print(f"报告上传完成: {output_uri}")
 
 
 if __name__ == "__main__":

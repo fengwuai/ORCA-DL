@@ -19,7 +19,8 @@ CRON = "0 2 1 * *"
 INFERENCE_CMD = ["pixi", "run", "-e", "model", "inference"]
 REPORT_CMD = ["pixi", "run", "-e", "orchestrator", "report"]
 TMP_BASE_DIR = ROOT / "tmp"
-REPORT_DIR = ROOT / "output" / "reports"
+S3_BUCKET = "fengwu-public"
+S3_PREFIX = "szcx_ocean_report"
 
 load_dotenv(dotenv_path=ROOT / ".env", override=False)
 
@@ -49,10 +50,8 @@ def resolve_prediction_path(target_month: str, pipeline_tmp_dir: str) -> Path:
     return Path(pipeline_tmp_dir) / f"orca_dl_prediction_{year}_{month}_24months.nc"
 
 
-def resolve_report_path(target_month: str) -> Path:
-    year, month = target_month.split("-")
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    return REPORT_DIR / f"ocean_report_{year}_{month}.pdf"
+def resolve_report_uri(target_month: str) -> str:
+    return f"s3://{S3_BUCKET}/{S3_PREFIX}/{target_month}.pdf"
 
 
 @task(name="执行海洋模型推理")
@@ -103,14 +102,14 @@ def run_inference_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool =
 @task(name="生成海洋模型报告")
 def run_report_task(prediction_path: str, target_month: str, dry_run: bool = False) -> str:
     logger = get_run_logger()
-    output_pdf = resolve_report_path(target_month)
+    output_uri = resolve_report_uri(target_month)
     command = [*REPORT_CMD, target_month]
 
     logger.info("报告命令: %s", " ".join(command))
 
     if dry_run:
         logger.warning("dry_run=True，跳过报告生成")
-        return str(output_pdf)
+        return output_uri
 
     env = os.environ.copy()
     env["ORCA_INFERENCE_OUTPUT_NC"] = str(prediction_path)
@@ -138,11 +137,8 @@ def run_report_task(prediction_path: str, target_month: str, dry_run: bool = Fal
     if result.stderr:
         logger.warning("stderr:\n%s", result.stderr)
 
-    if not output_pdf.is_file():
-        raise FileNotFoundError(f"报告文件未生成: {output_pdf}")
-
-    logger.info("报告生成成功: %s", output_pdf)
-    return str(output_pdf)
+    logger.info("报告上传成功: %s", output_uri)
+    return output_uri
 
 
 @flow(name=NAME, log_prints=True)
