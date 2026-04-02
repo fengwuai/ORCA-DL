@@ -3,9 +3,9 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -15,8 +15,10 @@ from openai import OpenAI
 
 ROOT = Path(__file__).resolve().parents[1]
 TMP_BASE_DIR = ROOT / "tmp"
+REPORT_DIR = ROOT / "output" / "reports"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
+PDF_MARGIN = "8mm"
 REQUIRED_SECTIONS = [
     "## 1. 摘要",
     "## 2. 气候趋势分析：ENSO 演变",
@@ -28,12 +30,48 @@ REQUIRED_SECTIONS = [
     "## 4. 对航运行业的影响分析",
     "## 5. 结论",
 ]
+REPORT_IMAGE_FILES = [
+    "nino34_timeseries.png",
+    "sst_map_0.png",
+    "sst_map_12.png",
+    "sst_map_23.png",
+    "mean_current_speed.png",
+]
 
 
 def load_root_env() -> None:
     env_path = ROOT / ".env"
     if env_path.is_file():
         load_dotenv(dotenv_path=env_path, override=False)
+
+
+def parse_target_month(target_month: str) -> str:
+    try:
+        dt = datetime.strptime(target_month, "%Y-%m")
+    except ValueError as exc:
+        raise ValueError(f"target_month 格式错误：{target_month}，应为 YYYY-MM（如 2026-02）") from exc
+    if dt.strftime("%Y-%m") != target_month:
+        raise ValueError(f"target_month 格式错误：{target_month}，应为 YYYY-MM（如 2026-02）")
+    return target_month
+
+
+def resolve_prediction_path(target_month: str) -> Path:
+    from_env = os.getenv("ORCA_INFERENCE_OUTPUT_NC")
+    if from_env:
+        prediction_path = Path(from_env).resolve()
+    else:
+        year, month = target_month.split("-")
+        prediction_path = (TMP_BASE_DIR / f"orca_dl_prediction_{year}_{month}_24months.nc").resolve()
+
+    if not prediction_path.is_file():
+        raise FileNotFoundError(f"预测文件不存在: {prediction_path}")
+    return prediction_path
+
+
+def resolve_report_pdf_path(target_month: str) -> Path:
+    year, month = target_month.split("-")
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    return (REPORT_DIR / f"ocean_report_{year}_{month}.pdf").resolve()
 
 
 def find_demo_dir() -> Path:
@@ -74,15 +112,17 @@ def run_analyzer(analyzer_script: Path, input_netcdf: Path, asset_dir: Path) -> 
     stats_path = asset_dir / "stats_summary.txt"
     if not stats_path.is_file():
         raise FileNotFoundError(f"analyzer 未生成统计文件: {stats_path}")
+
+    for filename in REPORT_IMAGE_FILES:
+        image_file = asset_dir / filename
+        if not image_file.is_file():
+            raise FileNotFoundError(f"报告图片缺失: {image_file}")
+
     return stats_path
 
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
-
-
-def to_posix_relative(path: Path, base: Path) -> str:
-    return os.path.relpath(path, base).replace(os.sep, "/")
 
 
 def strip_markdown_fence(text: str) -> str:
@@ -162,22 +202,54 @@ def validate_report_markdown(report_text: str, image_links: dict[str, str]) -> N
         raise RuntimeError(f"报告格式校验失败，缺失图片链接: {missing_images}")
 
 
-def generate_report(input_netcdf: Path, output_markdown: Path) -> Path:
-    if not input_netcdf.is_file():
-        raise FileNotFoundError(f"预测文件不存在: {input_netcdf}")
+def convert_markdown_to_pdf(markdown_path: Path, output_pdf: Path, work_dir: Path) -> None:
+    result = subprocess.run(
+        [
+            "pandoc",
+            str(markdown_path),
+            "--pdf-engine=typst",
+            "-M",
+            f"margin.top={PDF_MARGIN}",
+            "-M",
+            f"margin.bottom={PDF_MARGIN}",
+            "-M",
+            f"margin.left={PDF_MARGIN}",
+            "-M",
+            f"margin.right={PDF_MARGIN}",
+            "--resource-path",
+            str(work_dir),
+            "-o",
+            str(output_pdf),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "pandoc 转换 PDF 失败\n"
+            f"stdout:\n{result.stdout.strip()}\n"
+            f"stderr:\n{result.stderr.strip()}"
+        )
 
+
+def generate_pdf_report(target_month: str) -> Path:
+    resolved_month = parse_target_month(target_month)
     load_root_env()
+
+    input_netcdf = resolve_prediction_path(resolved_month)
+    output_pdf = resolve_report_pdf_path(resolved_month)
 
     demo_dir = find_demo_dir()
     template_path = demo_dir / "report.md"
     analyzer_script = demo_dir / "analyzer.py"
-    output_markdown.parent.mkdir(parents=True, exist_ok=True)
-    final_asset_dir = output_markdown.parent / f"{output_markdown.stem}_assets"
-    final_asset_dir.mkdir(parents=True, exist_ok=True)
 
     TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_report_") as tmp_dir:
-        temp_asset_dir = Path(tmp_dir) / "assets"
+        temp_dir = Path(tmp_dir)
+        temp_asset_dir = temp_dir / "assets"
+        temp_markdown_path = temp_dir / "report.md"
+
         stats_path = run_analyzer(
             analyzer_script=analyzer_script,
             input_netcdf=input_netcdf,
@@ -185,11 +257,11 @@ def generate_report(input_netcdf: Path, output_markdown: Path) -> Path:
         )
 
         image_links = {
-            "nino34": to_posix_relative(final_asset_dir / "nino34_timeseries.png", output_markdown.parent),
-            "sst0": to_posix_relative(final_asset_dir / "sst_map_0.png", output_markdown.parent),
-            "sst12": to_posix_relative(final_asset_dir / "sst_map_12.png", output_markdown.parent),
-            "sst23": to_posix_relative(final_asset_dir / "sst_map_23.png", output_markdown.parent),
-            "current": to_posix_relative(final_asset_dir / "mean_current_speed.png", output_markdown.parent),
+            "nino34": "assets/nino34_timeseries.png",
+            "sst0": "assets/sst_map_0.png",
+            "sst12": "assets/sst_map_12.png",
+            "sst23": "assets/sst_map_23.png",
+            "current": "assets/mean_current_speed.png",
         }
 
         messages = build_prompt(
@@ -200,36 +272,26 @@ def generate_report(input_netcdf: Path, output_markdown: Path) -> Path:
         markdown_text = generate_report_with_ark(messages)
         validate_report_markdown(markdown_text, image_links)
 
-        for filename in [
-            "nino34_timeseries.png",
-            "sst_map_0.png",
-            "sst_map_12.png",
-            "sst_map_23.png",
-            "mean_current_speed.png",
-        ]:
-            src_file = temp_asset_dir / filename
-            if not src_file.is_file():
-                raise FileNotFoundError(f"报告图片缺失: {src_file}")
-            shutil.copy2(src_file, final_asset_dir / filename)
+        temp_markdown_path.write_text(markdown_text + "\n", encoding="utf-8")
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        convert_markdown_to_pdf(
+            markdown_path=temp_markdown_path,
+            output_pdf=output_pdf,
+            work_dir=temp_dir,
+        )
 
-    output_markdown.parent.mkdir(parents=True, exist_ok=True)
-    output_markdown.write_text(markdown_text + "\n", encoding="utf-8")
-    return output_markdown
+    return output_pdf
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="生成海洋预测 markdown 报告")
-    parser.add_argument("--input-netcdf", required=True, help="预测 NetCDF 文件路径")
-    parser.add_argument("--output-markdown", required=True, help="输出 markdown 文件路径")
+    parser = argparse.ArgumentParser(description="生成海洋预测 PDF 报告")
+    parser.add_argument("target_month", help="目标月份，格式 YYYY-MM（如 2026-02）")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    output_path = generate_report(
-        input_netcdf=Path(args.input_netcdf).resolve(),
-        output_markdown=Path(args.output_markdown).resolve(),
-    )
+    output_path = generate_pdf_report(target_month=args.target_month)
     print(f"报告生成完成: {output_path}")
 
 

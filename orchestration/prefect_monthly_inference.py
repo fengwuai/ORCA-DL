@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
 from prefect import flow, get_run_logger, task
 from prefect.client.schemas.schedules import CronSchedule
 
@@ -15,21 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 NAME = "海洋模型预测"
 TIMEZONE = "Asia/Shanghai"
 CRON = "0 2 1 * *"
-INFERENCE_CMD = ["pixi", "run", "-e", "model", "python", "predict/inference.py"]
-REPORT_CMD = ["pixi", "run", "-e", "model", "python", "predict/generate_markdown_report.py"]
+INFERENCE_CMD = ["pixi", "run", "-e", "model", "inference"]
+REPORT_CMD = ["pixi", "run", "-e", "orchestrator", "report"]
 TMP_BASE_DIR = ROOT / "tmp"
 REPORT_DIR = ROOT / "output" / "reports"
 
-
-def load_dotenv_if_exists() -> None:
-    from dotenv import load_dotenv
-
-    env_path = ROOT / ".env"
-    if env_path.is_file():
-        load_dotenv(dotenv_path=env_path, override=False)
-
-
-load_dotenv_if_exists()
+load_dotenv(dotenv_path=ROOT / ".env", override=False)
 
 
 def resolve_target_month(target_month: str | None) -> str:
@@ -60,10 +52,10 @@ def resolve_prediction_path(target_month: str, pipeline_tmp_dir: str) -> Path:
 def resolve_report_path(target_month: str) -> Path:
     year, month = target_month.split("-")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    return REPORT_DIR / f"ocean_report_{year}_{month}.md"
+    return REPORT_DIR / f"ocean_report_{year}_{month}.pdf"
 
 
-@task(name="run-orca-inference")
+@task(name="执行海洋模型推理")
 def run_inference_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool = False) -> str:
     logger = get_run_logger()
     command = [*INFERENCE_CMD, target_month]
@@ -108,27 +100,25 @@ def run_inference_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool =
     return str(prediction_path)
 
 
-@task(name="run-ocean-report")
+@task(name="生成海洋模型报告")
 def run_report_task(prediction_path: str, target_month: str, dry_run: bool = False) -> str:
     logger = get_run_logger()
-    output_markdown = resolve_report_path(target_month)
-    command = [
-        *REPORT_CMD,
-        "--input-netcdf",
-        str(prediction_path),
-        "--output-markdown",
-        str(output_markdown),
-    ]
+    output_pdf = resolve_report_path(target_month)
+    command = [*REPORT_CMD, target_month]
 
     logger.info("报告命令: %s", " ".join(command))
 
     if dry_run:
         logger.warning("dry_run=True，跳过报告生成")
-        return str(output_markdown)
+        return str(output_pdf)
+
+    env = os.environ.copy()
+    env["ORCA_INFERENCE_OUTPUT_NC"] = str(prediction_path)
 
     result = subprocess.run(
         command,
         cwd=ROOT,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -148,11 +138,11 @@ def run_report_task(prediction_path: str, target_month: str, dry_run: bool = Fal
     if result.stderr:
         logger.warning("stderr:\n%s", result.stderr)
 
-    if not output_markdown.is_file():
-        raise FileNotFoundError(f"报告文件未生成: {output_markdown}")
+    if not output_pdf.is_file():
+        raise FileNotFoundError(f"报告文件未生成: {output_pdf}")
 
-    logger.info("报告生成成功: %s", output_markdown)
-    return str(output_markdown)
+    logger.info("报告生成成功: %s", output_pdf)
+    return str(output_pdf)
 
 
 @flow(name=NAME, log_prints=True)

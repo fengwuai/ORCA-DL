@@ -30,21 +30,33 @@ tqdm = "==4.65.2"
 transformers = "==4.28.1"
 xarray = "==2023.8.0"
 netcdf4 = ">=1.7.4, <2"
-openai = ">=1.40,<2"
-python-dotenv = ">=1.0,<2"
+
+[feature.model.tasks.inference]
+cmd = "python predict/inference.py"
 
 [feature.exec.dependencies]
 cdo = ">=2.5.0,<3"
 
 [feature.orchestrator.dependencies]
 python = "3.10.*"
+pandoc = ">=3.7.0,<4"
+typst = ">=0.13.1,<0.14"
 
 [feature.orchestrator.pypi-dependencies]
 prefect = "==3.6.23"
 python-dotenv = ">=1.0,<2"
+matplotlib = "==3.7.2"
+numpy = "==1.24.3"
+openai = ">=1.40,<2"
+pandas = "==2.0.3"
+xarray = "==2023.8.0"
+netcdf4 = ">=1.7.4, <2"
 
 [feature.orchestrator.tasks.pipeline-serve]
 cmd = "python orchestration/prefect_monthly_inference.py"
+
+[feature.orchestrator.tasks.report]
+cmd = "python predict/generate_markdown_report.py"
 
 [feature.orchestrator.tasks.pipeline-trigger]
 cmd = "python -m dotenv -f .env run -- prefect deployment run 海洋模型预测/海洋模型预测"
