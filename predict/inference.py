@@ -14,7 +14,8 @@ ORCA-DL GODAS 数据推理脚本
                 该月份的 GODAS 数据必须已发布
 
 输出：
-    ./output/predictions/orca_dl_prediction_2025_12_24months.nc
+    默认输出到临时目录（./tmp 下），用于后续报告生成；
+    不会在工作区保留 NetCDF 文件。
 
     包含以下变量（24 个月 × 6 个变量）：
     - so: 盐度 (salinity) [g/kg], shape: (24, 16, 128, 360)
@@ -86,9 +87,7 @@ VAR_MAPPING = {
 }
 
 # 输出配置
-OUTPUT_DIR = "./output/predictions"
-TMP_BASE_DIR = "./tmp"  # 临时文件基础目录
-GODAS_RAW_DIR = "./tmp/GODAS_raw"  # GODAS 原始数据目录（持久化）
+TMP_BASE_DIR = "./tmp"  # 临时文件基础目录（统一通过 TemporaryDirectory 管理）
 
 # 深度层级（米）
 DEPTH_LEVELS = [10, 15, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000]
@@ -759,19 +758,18 @@ def main(input_date: str):
         device = torch.device("cpu")
         print("⚠ GPU 不可用，使用 CPU（推理速度会较慢）")
 
-    # 4. 创建临时目录并执行推理
+    # 4. 在统一临时目录下执行推理
     print(f"\n[4/8] 下载 GODAS 数据（{year}-{month:02d}）...")
+    os.makedirs(TMP_BASE_DIR, exist_ok=True)
 
-    # 使用持久化的 GODAS 原始数据目录
-    os.makedirs(GODAS_RAW_DIR, exist_ok=True)
-    download_all_variables(year, month, GODAS_RAW_DIR)
-
-    with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_dl_") as tmp_dir:
+    with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_infer_") as tmp_dir:
+        raw_dir = os.path.join(tmp_dir, "raw")
         processed_dir = os.path.join(tmp_dir, "processed")
+        download_all_variables(year, month, raw_dir)
 
         # 5. 预处理数据
         print(f"\n[5/8] 预处理数据（CDO 插值）...")
-        preprocess_all_variables(GODAS_RAW_DIR, processed_dir, year, month)
+        preprocess_all_variables(raw_dir, processed_dir, year, month)
 
         # 6. 准备模型输入
         print(f"\n[6/8] 准备模型输入（归一化）...")
@@ -809,10 +807,10 @@ def main(input_date: str):
         print("  正在提取海表温度...")
         predictions['tos'] = extract_sst_from_pottmp(predictions['thetao'])
 
-        # 保存结果
-        output_file = os.path.join(
-            OUTPUT_DIR,
-            f"orca_dl_prediction_{year}_{month:02d}_24months.nc"
+        # 保存结果（默认放临时目录；可由编排层通过环境变量指定路径）
+        output_file = os.environ.get(
+            "ORCA_INFERENCE_OUTPUT_NC",
+            os.path.join(tmp_dir, f"orca_dl_prediction_{year}_{month:02d}_24months.nc"),
         )
         print(f"  正在保存到：{output_file}")
         save_to_netcdf(predictions, output_file, year, month)
@@ -820,11 +818,10 @@ def main(input_date: str):
     print("\n" + "=" * 60)
     print("推理完成！")
     print("=" * 60)
-    print(f"\n输出文件：{output_file}")
+    print(f"\n临时输出文件：{output_file}")
+    print("说明：当前流程不会在工作区保留 NetCDF 结果文件。")
     print(f"预测时间范围：{year}-{month:02d} 至 {year + (month + PREDICT_STEPS - 1) // 12}-{((month + PREDICT_STEPS - 1) % 12) + 1:02d}")
     print("包含变量：so, thetao, tos, uo, vo, zos")
-    print("\n验证命令：")
-    print(f"  pixi run -e exec ncdump -h {output_file}")
 
 
 if __name__ == "__main__":
@@ -838,4 +835,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n错误：{e}", file=sys.stderr)
         sys.exit(1)
-

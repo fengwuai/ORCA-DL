@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TMP_BASE_DIR = ROOT / "tmp"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
 REQUIRED_SECTIONS = [
@@ -168,25 +171,46 @@ def generate_report(input_netcdf: Path, output_markdown: Path) -> Path:
     demo_dir = find_demo_dir()
     template_path = demo_dir / "report.md"
     analyzer_script = demo_dir / "analyzer.py"
+    output_markdown.parent.mkdir(parents=True, exist_ok=True)
+    final_asset_dir = output_markdown.parent / f"{output_markdown.stem}_assets"
+    final_asset_dir.mkdir(parents=True, exist_ok=True)
 
-    asset_dir = output_markdown.parent / f"{output_markdown.stem}_assets"
-    stats_path = run_analyzer(analyzer_script=analyzer_script, input_netcdf=input_netcdf, asset_dir=asset_dir)
+    TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_report_") as tmp_dir:
+        temp_asset_dir = Path(tmp_dir) / "assets"
+        stats_path = run_analyzer(
+            analyzer_script=analyzer_script,
+            input_netcdf=input_netcdf,
+            asset_dir=temp_asset_dir,
+        )
 
-    image_links = {
-        "nino34": to_posix_relative(asset_dir / "nino34_timeseries.png", output_markdown.parent),
-        "sst0": to_posix_relative(asset_dir / "sst_map_0.png", output_markdown.parent),
-        "sst12": to_posix_relative(asset_dir / "sst_map_12.png", output_markdown.parent),
-        "sst23": to_posix_relative(asset_dir / "sst_map_23.png", output_markdown.parent),
-        "current": to_posix_relative(asset_dir / "mean_current_speed.png", output_markdown.parent),
-    }
+        image_links = {
+            "nino34": to_posix_relative(final_asset_dir / "nino34_timeseries.png", output_markdown.parent),
+            "sst0": to_posix_relative(final_asset_dir / "sst_map_0.png", output_markdown.parent),
+            "sst12": to_posix_relative(final_asset_dir / "sst_map_12.png", output_markdown.parent),
+            "sst23": to_posix_relative(final_asset_dir / "sst_map_23.png", output_markdown.parent),
+            "current": to_posix_relative(final_asset_dir / "mean_current_speed.png", output_markdown.parent),
+        }
 
-    messages = build_prompt(
-        template_markdown=read_text(template_path),
-        stats_summary=read_text(stats_path),
-        image_links=image_links,
-    )
-    markdown_text = generate_report_with_ark(messages)
-    validate_report_markdown(markdown_text, image_links)
+        messages = build_prompt(
+            template_markdown=read_text(template_path),
+            stats_summary=read_text(stats_path),
+            image_links=image_links,
+        )
+        markdown_text = generate_report_with_ark(messages)
+        validate_report_markdown(markdown_text, image_links)
+
+        for filename in [
+            "nino34_timeseries.png",
+            "sst_map_0.png",
+            "sst_map_12.png",
+            "sst_map_23.png",
+            "mean_current_speed.png",
+        ]:
+            src_file = temp_asset_dir / filename
+            if not src_file.is_file():
+                raise FileNotFoundError(f"报告图片缺失: {src_file}")
+            shutil.copy2(src_file, final_asset_dir / filename)
 
     output_markdown.parent.mkdir(parents=True, exist_ok=True)
     output_markdown.write_text(markdown_text + "\n", encoding="utf-8")

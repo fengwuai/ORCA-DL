@@ -1,7 +1,7 @@
 # Prefect 月度推理流水线
 
 本目录提供 ORCA-DL 的 Prefect 自动调度。
-流程会在推理完成后自动生成同名 markdown 报告。
+流程会在推理完成后自动生成 markdown 报告。
 
 任务与部署名称固定为：`海洋模型预测`。
 
@@ -33,7 +33,9 @@ pixi run -e orchestrator pipeline-serve
 - cron: `0 2 1 * *`
 - timezone: `Asia/Shanghai`
 - 自动执行上个月数据
-- 推理完成后生成报告：`output/predictions/orca_dl_prediction_YYYY_MM_24months.md`
+- 推理临时文件统一在 `./tmp` 下通过 `TemporaryDirectory` 管理并自动清理
+- 最终仅保留报告：`output/reports/ocean_report_YYYY_MM.md`
+- 图片目录：`output/reports/ocean_report_YYYY_MM_assets/`
 - 报告模板固定来源：`demo/20260312000000-自动化海洋报告生成/report.md`
 
 ## 4. 手动运行
