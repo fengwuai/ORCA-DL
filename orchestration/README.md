@@ -1,6 +1,7 @@
 # Prefect 月度推理流水线
 
 本目录提供 ORCA-DL 的 Prefect 自动调度。
+流程会在推理完成后自动生成同名 markdown 报告。
 
 任务与部署名称固定为：`海洋模型预测`。
 
@@ -16,7 +17,7 @@ pixi install -e orchestrator
 cp .env.example .env
 ```
 
-然后编辑 `.env`，填入真实认证信息。
+然后编辑 `.env`，填入真实认证信息（含 `ARK_API_KEY`）。
 
 说明：
 - 脚本会通过 `python-dotenv` 自动读取仓库根目录 `.env`。
@@ -32,6 +33,8 @@ pixi run -e orchestrator pipeline-serve
 - cron: `0 2 1 * *`
 - timezone: `Asia/Shanghai`
 - 自动执行上个月数据
+- 推理完成后生成报告：`output/predictions/orca_dl_prediction_YYYY_MM_24months.md`
+- 报告模板固定来源：`demo/20260312000000-自动化海洋报告生成/report.md`
 
 ## 4. 手动运行
 

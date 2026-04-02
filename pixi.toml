@@ -30,6 +30,8 @@ tqdm = "==4.65.2"
 transformers = "==4.28.1"
 xarray = "==2023.8.0"
 netcdf4 = ">=1.7.4, <2"
+openai = ">=1.40,<2"
+python-dotenv = ">=1.0,<2"
 
 [feature.exec.dependencies]
 cdo = ">=2.5.0,<3"
