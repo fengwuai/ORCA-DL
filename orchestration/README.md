@@ -61,3 +61,20 @@ pixi run -e orchestrator pipeline-trigger -- --param target_month=2026-02 --para
 ```
 
 注意：`target_month` 必须是 `YYYY-MM`（如 `2026-02`）。
+
+## 5. 自动部署（GitHub Actions）
+
+仓库内已提供部署资产：
+- `deploy/Dockerfile`
+- `deploy/docker-compose.prod.yml`
+- `.github/workflows/deploy.yml`
+
+发布策略：
+- `push main` 自动构建并发布镜像，再 SSH 到服务器执行 `docker compose up -d`。
+- 工作流固定镜像仓库参数：
+  - `REGISTRY=uhub.usuanova.com`
+  - `IMAGE_NAME=xiangfeng/orca-dl-pipeline`
+
+需要配置的 GitHub Secrets / Vars（命名与 `demo/deploy/deploy.yml` 风格一致）：
+- Secrets: `UHUB_USERNAME`, `UHUB_PASSWORD`, `DEPLOY_SSH_KEY`, `PREFECT_API_AUTH_STRING`, `ARK_API_KEY`, `US3_PUBLIC_KEY`, `US3_PRIVATE_KEY`
+- Vars: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `PREFECT_API_URL`, `US3_END_POINT`

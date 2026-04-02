@@ -1,0 +1,11 @@
+services:
+  orca-pipeline:
+    image: ${REGISTRY}/${IMAGE_NAME}:latest
+    container_name: orca-dl-pipeline
+    restart: always
+    env_file:
+      - .env
+    working_dir: /app
+    command: ["pixi", "run", "-e", "orchestrator", "pipeline-serve"]
+    volumes:
+      - ./tmp:/app/tmp
