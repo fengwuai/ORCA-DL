@@ -17,6 +17,9 @@ from openai import OpenAI
 ROOT = Path(__file__).resolve().parents[1]
 TMP_BASE_DIR = ROOT / "tmp"
 LEGACY_REPORT_DIR = ROOT / "output" / "reports"
+REPORT_ASSETS_DIR = ROOT / "predict" / "report_assets"
+REPORT_TEMPLATE_PATH = REPORT_ASSETS_DIR / "report_template.md"
+REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
 PDF_MARGIN = "8mm"
@@ -80,17 +83,11 @@ def resolve_legacy_local_pdf_path(target_month: str) -> Path:
     return LEGACY_REPORT_DIR / f"ocean_report_{year}_{month}.pdf"
 
 
-def find_demo_dir() -> Path:
-    demo_root = ROOT / "demo"
-    candidates = sorted(demo_root.glob("*自动化海洋报告生成"))
-    if not candidates:
-        candidates = sorted(path for path in demo_root.iterdir() if path.is_dir())
-
-    for path in candidates:
-        if (path / "analyzer.py").is_file() and (path / "report.md").is_file():
-            return path
-
-    raise FileNotFoundError("未找到可用的 demo 报告目录（需包含 analyzer.py 和 report.md）")
+def validate_report_assets() -> None:
+    if not REPORT_TEMPLATE_PATH.is_file():
+        raise FileNotFoundError(f"报告模板不存在: {REPORT_TEMPLATE_PATH}")
+    if not REPORT_ANALYZER_PATH.is_file():
+        raise FileNotFoundError(f"报告分析脚本不存在: {REPORT_ANALYZER_PATH}")
 
 
 def run_analyzer(analyzer_script: Path, input_netcdf: Path, asset_dir: Path) -> Path:
@@ -270,10 +267,7 @@ def generate_pdf_report(target_month: str) -> str:
     load_root_env()
 
     input_netcdf = resolve_prediction_path(resolved_month)
-
-    demo_dir = find_demo_dir()
-    template_path = demo_dir / "report.md"
-    analyzer_script = demo_dir / "analyzer.py"
+    validate_report_assets()
 
     TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_report_") as tmp_dir:
@@ -282,7 +276,7 @@ def generate_pdf_report(target_month: str) -> str:
         temp_markdown_path = temp_dir / "report.md"
 
         stats_path = run_analyzer(
-            analyzer_script=analyzer_script,
+            analyzer_script=REPORT_ANALYZER_PATH,
             input_netcdf=input_netcdf,
             asset_dir=temp_asset_dir,
         )
@@ -296,7 +290,7 @@ def generate_pdf_report(target_month: str) -> str:
         }
 
         messages = build_prompt(
-            template_markdown=read_text(template_path),
+            template_markdown=read_text(REPORT_TEMPLATE_PATH),
             stats_summary=read_text(stats_path),
             image_links=image_links,
         )
