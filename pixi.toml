@@ -60,7 +60,7 @@ cmd = "python orchestration/prefect_monthly_inference.py"
 cmd = "python predict/generate_markdown_report.py"
 
 [feature.orchestrator.tasks.pipeline-trigger]
-cmd = "python -m dotenv -f .env run -- prefect deployment run 海洋模型预测/海洋模型预测"
+cmd = "prefect deployment run 海洋模型预测/海洋模型预测"
 
 [environments]
 model = ["model"]

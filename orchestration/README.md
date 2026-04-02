@@ -61,6 +61,7 @@ pixi run -e orchestrator pipeline-trigger -- --param target_month=2026-02 --para
 ```
 
 注意：`target_month` 必须是 `YYYY-MM`（如 `2026-02`）。
+注意：`pipeline-trigger` 不再自动读取 `.env`，请确保当前运行环境已提供 `PREFECT_API_URL` 与 `PREFECT_API_AUTH_STRING`。
 
 ## 5. 自动部署（GitHub Actions）
 
