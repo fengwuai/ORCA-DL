@@ -79,3 +79,8 @@ pixi run -e orchestrator pipeline-trigger -- --param target_month=2026-02 --para
 需要配置的 GitHub Secrets / Vars（命名与 `demo/deploy/deploy.yml` 风格一致）：
 - Secrets: `UHUB_USERNAME`, `UHUB_PASSWORD`, `DEPLOY_SSH_KEY`, `PREFECT_API_AUTH_STRING`, `ARK_API_KEY`, `US3_PUBLIC_KEY`, `US3_PRIVATE_KEY`
 - Vars: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `PREFECT_API_URL`, `US3_END_POINT`
+
+部署前置：
+- 服务器需预置模型与统计文件（不随镜像分发）：
+  - `${DEPLOY_PATH}/ckpt/seed_1.bin`
+  - `${DEPLOY_PATH}/stat/mean/*` 与 `${DEPLOY_PATH}/stat/std/*`
