@@ -10,9 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import boto3
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from orchestration.xiamen_uploader import upload_file_to_xiamen
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,8 +26,6 @@ ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
 PDF_MARGIN = "8mm"
 PDF_MAIN_FONT = "Noto Sans CJK SC"
-S3_BUCKET = "fengwu-public"
-S3_PREFIX = "szcx_ocean_report"
 REQUIRED_SECTIONS = [
     "## 1. 摘要",
     "## 2. 气候趋势分析：ENSO 演变",
@@ -74,10 +73,6 @@ def resolve_prediction_path(target_month: str) -> Path:
     if not prediction_path.is_file():
         raise FileNotFoundError(f"预测文件不存在: {prediction_path}")
     return prediction_path
-
-
-def resolve_s3_key(target_month: str) -> str:
-    return f"{S3_PREFIX}/{target_month}.pdf"
 
 
 def resolve_local_pdf_path(target_month: str) -> Path:
@@ -246,27 +241,8 @@ def convert_markdown_to_pdf(markdown_path: Path, output_pdf: Path, work_dir: Pat
         )
 
 
-def upload_pdf_to_s3(pdf_path: Path, target_month: str) -> str:
-    public_key = os.getenv("US3_PUBLIC_KEY")
-    private_key = os.getenv("US3_PRIVATE_KEY")
-    end_point = os.getenv("US3_END_POINT")
-    if not public_key or not private_key or not end_point:
-        raise RuntimeError("缺少 US3 配置，请在 .env 中配置 US3_PUBLIC_KEY/US3_PRIVATE_KEY/US3_END_POINT")
-
-    key = resolve_s3_key(target_month)
-    client = boto3.client(
-        "s3",
-        endpoint_url=end_point,
-        aws_access_key_id=public_key,
-        aws_secret_access_key=private_key,
-    )
-    client.upload_file(
-        Filename=str(pdf_path),
-        Bucket=S3_BUCKET,
-        Key=key,
-        ExtraArgs={"ContentType": "application/pdf"},
-    )
-    return f"s3://{S3_BUCKET}/{key}"
+def upload_pdf_to_xiamen(pdf_path: Path, target_month: str) -> str:
+    return upload_file_to_xiamen(pdf_path, object_name=f"{target_month}.pdf")
 
 
 def generate_pdf_report(target_month: str) -> str:
@@ -312,7 +288,7 @@ def generate_pdf_report(target_month: str) -> str:
             work_dir=temp_dir,
         )
         save_pdf_to_local_dir(temp_pdf_path, resolved_month)
-        return upload_pdf_to_s3(temp_pdf_path, resolved_month)
+        return upload_pdf_to_xiamen(temp_pdf_path, resolved_month)
 
     raise RuntimeError("报告上传失败")
 

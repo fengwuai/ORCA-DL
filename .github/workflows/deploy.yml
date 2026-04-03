@@ -64,9 +64,8 @@ jobs:
 
           ARK_API_KEY=${{ secrets.ARK_API_KEY }}
 
-          US3_PUBLIC_KEY=${{ secrets.US3_PUBLIC_KEY }}
-          US3_PRIVATE_KEY=${{ secrets.US3_PRIVATE_KEY }}
-          US3_END_POINT=${{ vars.US3_END_POINT }}
+          XIAMEN_S3_AK=${{ secrets.XIAMEN_S3_AK }}
+          XIAMEN_S3_SK=${{ secrets.XIAMEN_S3_SK }}
           EOF
 
             docker login uhub.usuanova.com -u ${{ secrets.UHUB_USERNAME }} -p ${{ secrets.UHUB_PASSWORD }}

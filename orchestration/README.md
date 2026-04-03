@@ -18,7 +18,7 @@ pixi install -e model
 cp .env.example .env
 ```
 
-然后编辑 `.env`，填入真实认证信息（含 `ARK_API_KEY` 与 `US3_*`）。
+然后编辑 `.env`，填入真实认证信息（含 `ARK_API_KEY` 与 `XIAMEN_S3_*`）。
 
 说明：
 - 脚本会通过 `python-dotenv` 自动读取仓库根目录 `.env`。
@@ -39,7 +39,7 @@ pixi run -e orchestrator pipeline-serve
 - Prefect 中可见推理阶段：依赖检查、数据下载、预处理、模型推理、结果转换、报告生成
 - `cpc` 下载缓存固定目录：`./tmp/cpc_cache`（容器内 `/app/tmp/cpc_cache`）
 - 推理临时文件统一在 `./tmp` 下通过 `TemporaryDirectory` 管理并自动清理
-- 最终产物上传到：`s3://fengwu-public/szcx_ocean_report/YYYY-MM.pdf`
+- 最终产物上传到：`s3://szcx-ds-wthr-public/ocean_report/YYYY-MM.pdf`
 - 本地固定保留一份 PDF：`./output/reports/YYYY-MM.pdf`
 - 报告模板固定来源：`orchestration/reporting/assets/report_template.md`
 - 报告分析脚本固定来源：`orchestration/reporting/assets/analyzer.py`
@@ -109,8 +109,8 @@ print(uri)
   - `IMAGE_NAME=xiangfeng/orca-dl-pipeline`
 
 需要配置的 GitHub Secrets / Vars（命名与当前部署工作流一致）：
-- Secrets: `UHUB_USERNAME`, `UHUB_PASSWORD`, `DEPLOY_SSH_KEY`, `PREFECT_API_AUTH_STRING`, `ARK_API_KEY`, `US3_PUBLIC_KEY`, `US3_PRIVATE_KEY`
-- Vars: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `PREFECT_API_URL`, `US3_END_POINT`
+- Secrets: `UHUB_USERNAME`, `UHUB_PASSWORD`, `DEPLOY_SSH_KEY`, `PREFECT_API_AUTH_STRING`, `ARK_API_KEY`, `XIAMEN_S3_AK`, `XIAMEN_S3_SK`
+- Vars: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH`, `PREFECT_API_URL`
 
 部署前置：
 - 服务器需预置模型与统计文件（不随镜像分发）：

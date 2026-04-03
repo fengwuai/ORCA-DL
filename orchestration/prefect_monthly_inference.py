@@ -20,8 +20,8 @@ INFERENCE_CMD = ["pixi", "run", "-e", "model", "inference"]
 REPORT_CMD = ["pixi", "run", "-e", "orchestrator", "report"]
 TMP_BASE_DIR = ROOT / "tmp"
 CPC_CACHE_DIR = TMP_BASE_DIR / "cpc_cache"
-S3_BUCKET = "fengwu-public"
-S3_PREFIX = "szcx_ocean_report"
+S3_BUCKET = "szcx-ds-wthr-public"
+S3_PREFIX = "ocean_report"
 TASK_RETRIES = 1
 TASK_RETRY_DELAY_SECONDS = 30
 
