@@ -10,5 +10,6 @@ services:
     volumes:
       - ./tmp:/app/tmp
       - ./tmp/cpc_cache:/app/tmp/cpc_cache
+      - ./output/reports:/app/output/reports
       - ./ckpt:/app/ckpt:ro
       - ./stat:/app/stat:ro

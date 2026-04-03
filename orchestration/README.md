@@ -40,7 +40,7 @@ pixi run -e orchestrator pipeline-serve
 - `cpc` 下载缓存固定目录：`./tmp/cpc_cache`（容器内 `/app/tmp/cpc_cache`）
 - 推理临时文件统一在 `./tmp` 下通过 `TemporaryDirectory` 管理并自动清理
 - 最终产物上传到：`s3://fengwu-public/szcx_ocean_report/YYYY-MM.pdf`
-- 本地 `output` 不保留当前流程生成的 PDF 文件
+- 本地固定保留一份 PDF：`./output/reports/YYYY-MM.pdf`
 - 报告模板固定来源：`orchestration/reporting/assets/report_template.md`
 - 报告分析脚本固定来源：`orchestration/reporting/assets/analyzer.py`
 

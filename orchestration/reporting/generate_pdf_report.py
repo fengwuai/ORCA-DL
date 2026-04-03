@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -16,7 +17,7 @@ from openai import OpenAI
 
 ROOT = Path(__file__).resolve().parents[2]
 TMP_BASE_DIR = ROOT / "tmp"
-LEGACY_REPORT_DIR = ROOT / "output" / "reports"
+LOCAL_REPORT_DIR = ROOT / "output" / "reports"
 REPORT_ASSETS_DIR = ROOT / "orchestration" / "reporting" / "assets"
 REPORT_TEMPLATE_PATH = REPORT_ASSETS_DIR / "report_template.md"
 REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
@@ -78,9 +79,15 @@ def resolve_s3_key(target_month: str) -> str:
     return f"{S3_PREFIX}/{target_month}.pdf"
 
 
-def resolve_legacy_local_pdf_path(target_month: str) -> Path:
-    year, month = target_month.split("-")
-    return LEGACY_REPORT_DIR / f"ocean_report_{year}_{month}.pdf"
+def resolve_local_pdf_path(target_month: str) -> Path:
+    return LOCAL_REPORT_DIR / f"{target_month}.pdf"
+
+
+def save_pdf_to_local_dir(pdf_path: Path, target_month: str) -> Path:
+    local_pdf_path = resolve_local_pdf_path(target_month)
+    local_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pdf_path, local_pdf_path)
+    return local_pdf_path
 
 
 def validate_report_assets() -> None:
@@ -256,9 +263,6 @@ def upload_pdf_to_s3(pdf_path: Path, target_month: str) -> str:
         Key=key,
         ExtraArgs={"ContentType": "application/pdf"},
     )
-    legacy_pdf = resolve_legacy_local_pdf_path(target_month)
-    if legacy_pdf.is_file():
-        legacy_pdf.unlink()
     return f"s3://{S3_BUCKET}/{key}"
 
 
@@ -304,6 +308,7 @@ def generate_pdf_report(target_month: str) -> str:
             output_pdf=temp_pdf_path,
             work_dir=temp_dir,
         )
+        save_pdf_to_local_dir(temp_pdf_path, resolved_month)
         return upload_pdf_to_s3(temp_pdf_path, resolved_month)
 
     raise RuntimeError("报告上传失败")
