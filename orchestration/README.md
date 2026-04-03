@@ -74,7 +74,28 @@ pixi run -e orchestrator pipeline-trigger -- --param source=psl --param target_m
 注意：`source` 仅支持 `cpc` / `psl`，默认 `cpc`。
 注意：`pipeline-trigger` 不再自动读取 `.env`，请确保当前运行环境已提供 `PREFECT_API_URL` 与 `PREFECT_API_AUTH_STRING`。
 
-## 5. 自动部署（GitHub Actions）
+## 5. 厦门上传模块
+
+新增独立模块：`orchestration/xiamen_uploader.py`。
+
+说明：
+- 只读取两个环境变量：`XIAMEN_S3_AK`、`XIAMEN_S3_SK`
+- 其他参数（bucket/region/internal ip/public domain/path）在模块中固定
+- 上传路径前缀固定为：`ocean_report/`
+- 重试逻辑使用 `tenacity`
+
+调用示例：
+
+```python
+from orchestration.xiamen_uploader import upload_file_to_xiamen
+
+uri = upload_file_to_xiamen("./output/reports/2026-02.pdf")
+# 或指定对象名（仍上传到 ocean_report/ 前缀下）
+uri = upload_file_to_xiamen("./output/reports/2026-02.pdf", object_name="custom-name.pdf")
+print(uri)
+```
+
+## 6. 自动部署（GitHub Actions）
 
 仓库内已提供部署资产：
 - `deploy/Dockerfile`
