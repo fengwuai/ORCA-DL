@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from prefect import flow, get_run_logger
 from prefect.client.schemas.schedules import CronSchedule
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -25,6 +27,10 @@ CRON = "0 2 20 * *"
 INFERENCE_CMD = ["pixi", "run", "-e", "model", "inference"]
 TMP_BASE_DIR = ROOT / "tmp"
 DEFAULT_REPORT_OUTPUT_DIR = "./output/reports"
+PIPELINE_WEBHOOK_URL = "https://www.feishu.cn/flow/api/trigger-webhook/b26f56b1d7fa73b40503900ce51e2bfe"
+PUBLIC_REPORT_BASE_URL = "https://qx.app.xmschain.com/public/ocean_report"
+WEBHOOK_CONNECT_TIMEOUT_SECONDS = 5
+WEBHOOK_READ_TIMEOUT_SECONDS = 10
 
 load_dotenv(dotenv_path=ROOT / ".env", override=False)
 
@@ -99,6 +105,32 @@ def run_command(command: list[str], task_name: str) -> None:
         logger.warning("[%s] stderr:\n%s", task_name, result.stderr)
 
 
+def build_public_report_url(target_month: str) -> str:
+    return f"{PUBLIC_REPORT_BASE_URL}/{target_month}.pdf"
+
+
+def send_pipeline_notification(title: str, message: str) -> None:
+    logger = resolve_logger()
+    payload = {"title": title, "message": message}
+    try:
+        response = requests.post(
+            PIPELINE_WEBHOOK_URL,
+            data=json.dumps(payload, ensure_ascii=False),
+            headers={"Content-Type": "application/json"},
+            timeout=(WEBHOOK_CONNECT_TIMEOUT_SECONDS, WEBHOOK_READ_TIMEOUT_SECONDS),
+        )
+    except requests.RequestException as exc:
+        logger.warning("发送 webhook 通知失败: %s", exc)
+        return
+
+    if not response.ok:
+        logger.warning(
+            "webhook 返回非成功状态: status=%s, body=%s",
+            response.status_code,
+            (response.text or "")[:500],
+        )
+
+
 def run_monthly_pipeline(
     target_month: str | None = None,
     source: str = "cpc",
@@ -116,35 +148,64 @@ def run_monthly_pipeline(
     logger.info("流程最终数据源=%s", resolved_source)
     logger.info("流程最终报告目录=%s", resolved_output_dir)
 
-    TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="pipeline_") as pipeline_tmp_dir:
-        temp_model_dir = Path(pipeline_tmp_dir) / "models"
-        temp_model_dir.mkdir(parents=True, exist_ok=True)
+    send_pipeline_notification(
+        title="海洋模型月度流程开始",
+        message=(
+            f"任务已启动，月份：{resolved_month}；"
+            f"数据源：{resolved_source}；"
+            f"报告输出目录：{resolved_output_dir}。"
+        ),
+    )
 
-        run_command(
-            [
-                *INFERENCE_CMD,
-                resolved_month,
-                "--source",
-                resolved_source,
-                "--output-dir",
-                str(temp_model_dir),
-            ],
-            task_name="执行推理流程",
-        )
+    try:
+        TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="pipeline_") as pipeline_tmp_dir:
+            temp_model_dir = Path(pipeline_tmp_dir) / "models"
+            temp_model_dir.mkdir(parents=True, exist_ok=True)
 
-        prediction_path = temp_model_dir / f"{resolved_month}.nc"
-        if not prediction_path.is_file():
-            raise FileNotFoundError(f"推理结果未生成: {prediction_path}")
+            run_command(
+                [
+                    *INFERENCE_CMD,
+                    resolved_month,
+                    "--source",
+                    resolved_source,
+                    "--output-dir",
+                    str(temp_model_dir),
+                ],
+                task_name="执行推理流程",
+            )
 
-        report_uri = generate_pdf_report(
-            target_month=resolved_month,
-            input_netcdf_path=prediction_path,
-            output_dir=resolved_output_dir,
-        )
+            prediction_path = temp_model_dir / f"{resolved_month}.nc"
+            if not prediction_path.is_file():
+                raise FileNotFoundError(f"推理结果未生成: {prediction_path}")
+
+            report_uri = generate_pdf_report(
+                target_month=resolved_month,
+                input_netcdf_path=prediction_path,
+                output_dir=resolved_output_dir,
+            )
 
         logger.info("流程完成，报告路径=%s", report_uri)
+        send_pipeline_notification(
+            title="海洋模型月度流程完成",
+            message=(
+                f"任务执行完成，月份：{resolved_month}；"
+                f"数据源：{resolved_source}；"
+                f"报告地址：{build_public_report_url(resolved_month)}。"
+            ),
+        )
         return report_uri
+
+    except Exception as exc:
+        send_pipeline_notification(
+            title="海洋模型月度流程失败",
+            message=(
+                f"任务执行失败，月份：{resolved_month}；"
+                f"数据源：{resolved_source}；"
+                f"错误：{type(exc).__name__}: {exc}。"
+            ),
+        )
+        raise
 
 
 @flow(name=NAME, log_prints=True)
