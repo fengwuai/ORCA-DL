@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import shutil
@@ -18,7 +17,7 @@ from orchestration.xiamen_uploader import upload_file_to_xiamen
 
 ROOT = Path(__file__).resolve().parents[2]
 TMP_BASE_DIR = ROOT / "tmp"
-LOCAL_REPORT_DIR = ROOT / "output" / "reports"
+DEFAULT_REPORT_OUTPUT_DIR = ROOT / "output" / "reports"
 REPORT_ASSETS_DIR = ROOT / "orchestration" / "reporting" / "assets"
 REPORT_TEMPLATE_PATH = REPORT_ASSETS_DIR / "report_template.md"
 REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
@@ -68,25 +67,12 @@ def parse_target_month(target_month: str) -> str:
     return target_month
 
 
-def resolve_prediction_path(target_month: str) -> Path:
-    from_env = os.getenv("ORCA_INFERENCE_OUTPUT_NC")
-    if from_env:
-        prediction_path = Path(from_env).resolve()
-    else:
-        year, month = target_month.split("-")
-        prediction_path = (TMP_BASE_DIR / f"orca_dl_prediction_{year}_{month}_24months.nc").resolve()
-
-    if not prediction_path.is_file():
-        raise FileNotFoundError(f"预测文件不存在: {prediction_path}")
-    return prediction_path
+def resolve_local_pdf_path(target_month: str, output_dir: Path) -> Path:
+    return output_dir / f"{target_month}.pdf"
 
 
-def resolve_local_pdf_path(target_month: str) -> Path:
-    return LOCAL_REPORT_DIR / f"{target_month}.pdf"
-
-
-def save_pdf_to_local_dir(pdf_path: Path, target_month: str) -> Path:
-    local_pdf_path = resolve_local_pdf_path(target_month)
+def save_pdf_to_local_dir(pdf_path: Path, target_month: str, output_dir: Path) -> Path:
+    local_pdf_path = resolve_local_pdf_path(target_month, output_dir=output_dir)
     local_pdf_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(pdf_path, local_pdf_path)
     return local_pdf_path
@@ -275,11 +261,18 @@ def upload_pdf_to_xiamen(pdf_path: Path, target_month: str) -> str:
     return upload_file_to_xiamen(pdf_path, object_name=f"{target_month}.pdf")
 
 
-def generate_pdf_report(target_month: str) -> str:
+def generate_pdf_report(
+    target_month: str,
+    input_netcdf_path: str | Path,
+    output_dir: str | Path = DEFAULT_REPORT_OUTPUT_DIR,
+) -> str:
     resolved_month = parse_target_month(target_month)
     load_root_env()
+    resolved_input_netcdf = Path(input_netcdf_path).expanduser().resolve()
+    if not resolved_input_netcdf.is_file():
+        raise FileNotFoundError(f"预测文件不存在: {resolved_input_netcdf}")
+    resolved_output_dir = Path(output_dir).expanduser().resolve()
 
-    input_netcdf = resolve_prediction_path(resolved_month)
     validate_report_assets()
 
     TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -290,7 +283,7 @@ def generate_pdf_report(target_month: str) -> str:
 
         stats_path = run_analyzer(
             analyzer_script=REPORT_ANALYZER_PATH,
-            input_netcdf=input_netcdf,
+            input_netcdf=resolved_input_netcdf,
             asset_dir=temp_asset_dir,
         )
 
@@ -317,23 +310,7 @@ def generate_pdf_report(target_month: str) -> str:
             output_pdf=temp_pdf_path,
             work_dir=temp_dir,
         )
-        save_pdf_to_local_dir(temp_pdf_path, resolved_month)
+        save_pdf_to_local_dir(temp_pdf_path, resolved_month, output_dir=resolved_output_dir)
         return upload_pdf_to_xiamen(temp_pdf_path, resolved_month)
 
     raise RuntimeError("报告上传失败")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="生成海洋预测 PDF 报告")
-    parser.add_argument("target_month", help="目标月份，格式 YYYY-MM（如 2026-02）")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output_uri = generate_pdf_report(target_month=args.target_month)
-    print(f"报告上传完成: {output_uri}")
-
-
-if __name__ == "__main__":
-    main()

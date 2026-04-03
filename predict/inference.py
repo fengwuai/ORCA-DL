@@ -1,25 +1,25 @@
 """
-ORCA-DL GODAS 数据推理脚本
+ORCA-DL GODAS 数据推理 CLI（仅推理流程）
 
 功能：
-    根据指定的年月下载 GODAS 数据，进行预处理和归一化，
-    使用训练好的 ORCA-DL 模型进行 24 个月的海洋状态预测，
-    并将结果保存为 NetCDF 文件。
+    根据指定月份下载 GODAS 数据、执行预处理与模型推理，
+    最终输出 NetCDF 文件到指定目录。
 
 使用方式：
-    pixi run -e model inference 2025-12
-    pixi run -e model inference 2025-12 --source psl
+    pixi run -e model inference
+    pixi run -e model inference 2026-02 --source psl --output-dir ./output/models
 
 参数：
-    input_date: 初始化月份，格式为 YYYY-MM（如 2025-12）
-                该月份的 GODAS 数据必须已发布
+    target_month: 目标月份，格式 YYYY-MM（如 2026-02）
+                  不传时默认上个月（Asia/Shanghai）
+    --output-dir: NetCDF 输出目录，默认 ./output/models
     --source:   数据源（默认 cpc）
                 cpc: CPC 单月 GRIB 文件
                 psl: PSL 按变量分年 NetCDF 文件
 
 输出：
-    默认输出到临时目录（./tmp 下），用于后续报告生成；
-    不会在工作区保留 NetCDF 文件。
+    输出文件为 {output_dir}/{target_month}.nc
+    推理中间文件统一使用 TemporaryDirectory 管理并自动清理。
 
     包含以下变量（24 个月 × 6 个变量）：
     - so: 盐度 (salinity) [g/kg], shape: (24, 16, 128, 360)
@@ -50,7 +50,8 @@ import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Dict, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import torch
@@ -109,6 +110,8 @@ VAR_MAPPING = {
 # 输出配置
 TMP_BASE_DIR = "./tmp"  # 临时文件基础目录（统一通过 TemporaryDirectory 管理）
 CPC_CACHE_DIR = os.path.join(TMP_BASE_DIR, "cpc_cache")
+DEFAULT_OUTPUT_DIR = "./output/models"
+TIMEZONE = "Asia/Shanghai"
 
 # 深度层级（米）
 DEPTH_LEVELS = [10, 15, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000]
@@ -138,9 +141,27 @@ def parse_date(date_str: str) -> Tuple[int, int]:
     """
     try:
         dt = datetime.strptime(date_str, "%Y-%m")
-        return dt.year, dt.month
-    except ValueError:
+    except ValueError as exc:
+        raise ValueError(f"日期格式错误：{date_str}，应为 YYYY-MM 格式（如 2025-12）") from exc
+    if dt.strftime("%Y-%m") != date_str:
         raise ValueError(f"日期格式错误：{date_str}，应为 YYYY-MM 格式（如 2025-12）")
+    return dt.year, dt.month
+
+
+def resolve_target_month(target_month: str | None) -> str:
+    if target_month:
+        parse_date(target_month)
+        return target_month
+
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    previous_month_last_day = now.replace(
+        day=1,
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    ) - timedelta(days=1)
+    return previous_month_last_day.strftime("%Y-%m")
 
 
 def check_dependencies():
@@ -912,20 +933,7 @@ def convert_predictions_to_netcdf(preds_path: str, output_path: str, year: int, 
     return output_path
 
 
-def run_check_stage() -> None:
-    """执行依赖与设备检查。"""
-    print("[检查] 检查依赖项...")
-    check_dependencies()
-    print("[检查] 检查计算设备...")
-    resolve_device()
-
-
-def run_download_stage(
-    target_month: str,
-    raw_dir: str,
-    source: str = "cpc",
-    var_name: str | None = None,
-) -> str:
+def run_download_step(target_month: str, raw_dir: str, source: str = "cpc") -> str:
     """下载数据（按 source 选择 CPC 或 PSL）。"""
     year, month = parse_date(target_month)
 
@@ -938,12 +946,6 @@ def run_download_stage(
 
     if source == "psl":
         Path(raw_dir).mkdir(parents=True, exist_ok=True)
-        if var_name:
-            if var_name not in ALL_GODAS_VARS:
-                raise ValueError(f"变量名不支持：{var_name}，可选值：{ALL_GODAS_VARS}")
-            print(f"[下载] source={source}, 变量={var_name}, 月份={target_month}")
-            download_godas_data(year, month, var_name, raw_dir)
-            return os.path.join(raw_dir, f"{var_name}.{year}.nc")
         print(f"[下载] source={source}, 月份={target_month}")
         download_all_variables(year, month, raw_dir)
         return raw_dir
@@ -951,12 +953,7 @@ def run_download_stage(
     raise ValueError(f"不支持的 source: {source}")
 
 
-def run_preprocess_stage(
-    target_month: str,
-    raw_dir: str,
-    processed_dir: str,
-    source: str = "cpc",
-) -> str:
+def run_preprocess_step(target_month: str, raw_dir: str, processed_dir: str, source: str = "cpc") -> str:
     """执行预处理（按 source 选择 CPC 或 PSL）。"""
     year, month = parse_date(target_month)
     effective_raw_dir = CPC_CACHE_DIR if source == "cpc" else raw_dir
@@ -981,97 +978,83 @@ def validate_source(source: str) -> str:
     return source
 
 
-def run_infer_stage(target_month: str, processed_dir: str, preds_output_path: str) -> str:
-    """执行推理并产出中间 NPY。"""
-    _, month = parse_date(target_month)
-    return run_model_inference(
-        processed_dir=processed_dir,
-        month=month,
-        preds_output_path=preds_output_path,
-    )
-
-
-def run_convert_stage(target_month: str, preds_path: str, output_path: str) -> str:
-    """执行预测结果转换并保存 NetCDF。"""
-    year, month = parse_date(target_month)
-    return convert_predictions_to_netcdf(
-        preds_path=preds_path,
-        output_path=output_path,
-        year=year,
-        month=month,
-    )
-
-
-def run_full_pipeline(target_month: str, source: str = "cpc") -> str:
-    """执行完整推理流程。"""
-    source = validate_source(source)
-    year, month = parse_date(target_month)
+def run_inference_only_pipeline(
+    target_month: str | None = None,
+    output_dir: str = DEFAULT_OUTPUT_DIR,
+    source: str = "cpc",
+) -> str:
+    """执行仅推理流程并将 NetCDF 落盘到 output_dir。"""
+    resolved_month = resolve_target_month(target_month)
+    resolved_source = validate_source(source)
+    year, month = parse_date(resolved_month)
+    output_path = Path(output_dir).expanduser().resolve() / f"{resolved_month}.nc"
 
     print("=" * 60)
-    print("ORCA-DL 海洋状态预测系统")
+    print("ORCA-DL 海洋状态预测系统（仅推理）")
     print("=" * 60)
-    print(f"\n[1/6] 解析输入日期：{target_month}")
+    print(f"\n[1/5] 解析输入日期：{resolved_month}")
     print(f"✓ 起始日期：{year} 年 {month} 月")
-    print(f"✓ 数据源：{source.upper()}")
+    print(f"✓ 数据源：{resolved_source.upper()}")
+    print(f"✓ 输出目录：{output_path.parent}")
 
-    print("\n[2/6] 检查依赖与设备...")
+    print("\n[2/5] 检查依赖与设备...")
     check_dependencies()
     resolve_device()
 
-    print(f"\n[3/6] 下载 GODAS 数据（{year}-{month:02d}）...")
+    print(f"\n[3/5] 下载 GODAS 数据（{year}-{month:02d}）...")
     os.makedirs(TMP_BASE_DIR, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_infer_") as tmp_dir:
-        raw_dir = CPC_CACHE_DIR if source == "cpc" else os.path.join(tmp_dir, "raw")
+        raw_dir = CPC_CACHE_DIR if resolved_source == "cpc" else os.path.join(tmp_dir, "raw")
         processed_dir = os.path.join(tmp_dir, "processed")
         preds_path = os.path.join(tmp_dir, "preds.npy")
-        output_file = os.environ.get(
-            "ORCA_INFERENCE_OUTPUT_NC",
-            os.path.join(tmp_dir, f"orca_dl_prediction_{year}_{month:02d}_24months.nc"),
-        )
-        if source == "cpc":
+        if resolved_source == "cpc":
             Path(raw_dir).mkdir(parents=True, exist_ok=True)
 
-        run_download_stage(
-            target_month=target_month,
+        run_download_step(
+            target_month=resolved_month,
             raw_dir=raw_dir,
-            source=source,
+            source=resolved_source,
         )
 
-        print(f"\n[4/6] 预处理数据（CDO 插值）...")
-        run_preprocess_stage(
-            target_month=target_month,
+        print(f"\n[4/5] 预处理数据（CDO 插值）...")
+        run_preprocess_step(
+            target_month=resolved_month,
             raw_dir=raw_dir,
             processed_dir=processed_dir,
-            source=source,
+            source=resolved_source,
         )
 
-        print("\n[5/6] 执行模型推理...")
+        print("\n[5/5] 执行模型推理与结果转换...")
         run_model_inference(
             processed_dir=processed_dir,
             month=month,
             preds_output_path=preds_path,
         )
-
-        print("\n[6/6] 转换并保存结果...")
-        run_convert_stage(
-            target_month=target_month,
+        convert_predictions_to_netcdf(
             preds_path=preds_path,
-            output_path=output_file,
+            output_path=str(output_path),
+            year=year,
+            month=month,
         )
 
     print("\n" + "=" * 60)
     print("推理完成！")
     print("=" * 60)
-    print(f"\n临时输出文件：{output_file}")
-    print("说明：当前流程不会在工作区保留 NetCDF 结果文件。")
+    print(f"\n输出文件：{output_path}")
     print(f"预测时间范围：{year}-{month:02d} 至 {year + (month + PREDICT_STEPS - 1) // 12}-{((month + PREDICT_STEPS - 1) % 12) + 1:02d}")
     print("包含变量：so, thetao, tos, uo, vo, zos")
-    return output_file
+    return str(output_path)
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ORCA-DL 海洋状态预测")
-    parser.add_argument("target_month", nargs="?", help="目标月份，格式 YYYY-MM（如 2026-02）")
+    parser = argparse.ArgumentParser(description="ORCA-DL 海洋状态预测（仅推理）")
+    parser.add_argument(
+        "target_month",
+        nargs="?",
+        help="目标月份，格式 YYYY-MM（如 2026-02）；默认上个月",
+    )
     parser.add_argument(
         "--source",
         choices=["cpc", "psl"],
@@ -1079,79 +1062,20 @@ def parse_args() -> argparse.Namespace:
         help="数据源：cpc（默认）或 psl",
     )
     parser.add_argument(
-        "--stage",
-        choices=["full", "check", "download", "preprocess", "infer", "convert"],
-        default="full",
-        help="执行阶段（默认 full）",
+        "--output-dir",
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"输出目录（默认 {DEFAULT_OUTPUT_DIR}）",
     )
-    parser.add_argument("--raw-dir", help="原始数据目录（download/preprocess 阶段使用）")
-    parser.add_argument("--processed-dir", help="预处理目录（preprocess/infer 阶段使用）")
-    parser.add_argument("--preds-path", help="推理结果 NPY 路径（infer/convert 阶段使用）")
-    parser.add_argument("--output", help="输出 NetCDF 路径（convert 阶段使用）")
-    parser.add_argument("--var", help="下载变量名（download 阶段使用）")
     return parser.parse_args()
-
-
-def require_arg(value: str | None, arg_name: str, stage: str) -> str:
-    if value:
-        return value
-    raise ValueError(f"--{arg_name} 为必填参数（stage={stage}）")
 
 
 def main() -> None:
     args = parse_args()
-    source = validate_source(args.source)
-
-    if args.stage == "check":
-        run_check_stage()
-        return
-
-    target_month = args.target_month
-    if not target_month:
-        raise ValueError("缺少 target_month，格式应为 YYYY-MM（如 2026-02）")
-
-    if args.stage == "full":
-        run_full_pipeline(target_month=target_month, source=source)
-        return
-
-    if args.stage == "download":
-        raw_dir = require_arg(args.raw_dir, "raw-dir", args.stage)
-        output = run_download_stage(
-            target_month=target_month,
-            raw_dir=raw_dir,
-            source=source,
-            var_name=args.var,
-        )
-        print(f"下载完成：{output}")
-        return
-
-    if args.stage == "preprocess":
-        raw_dir = require_arg(args.raw_dir, "raw-dir", args.stage)
-        processed_dir = require_arg(args.processed_dir, "processed-dir", args.stage)
-        output = run_preprocess_stage(
-            target_month=target_month,
-            raw_dir=raw_dir,
-            processed_dir=processed_dir,
-            source=source,
-        )
-        print(f"预处理完成：{output}")
-        return
-
-    if args.stage == "infer":
-        processed_dir = require_arg(args.processed_dir, "processed-dir", args.stage)
-        preds_path = require_arg(args.preds_path, "preds-path", args.stage)
-        output = run_infer_stage(target_month=target_month, processed_dir=processed_dir, preds_output_path=preds_path)
-        print(f"推理完成：{output}")
-        return
-
-    if args.stage == "convert":
-        preds_path = require_arg(args.preds_path, "preds-path", args.stage)
-        output_path = require_arg(args.output, "output", args.stage)
-        output = run_convert_stage(target_month=target_month, preds_path=preds_path, output_path=output_path)
-        print(f"转换完成：{output}")
-        return
-
-    raise ValueError(f"不支持的 stage: {args.stage}")
+    run_inference_only_pipeline(
+        target_month=args.target_month,
+        output_dir=args.output_dir,
+        source=args.source,
+    )
 
 
 if __name__ == "__main__":

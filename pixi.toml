@@ -30,6 +30,7 @@ tqdm = "==4.65.2"
 transformers = "==4.28.1"
 xarray = "==2023.8.0"
 netcdf4 = ">=1.7.4, <2"
+tenacity = ">=9.0,<10"
 
 [feature.model.tasks.inference]
 cmd = "python predict/inference.py"
@@ -56,13 +57,10 @@ xarray = "==2023.8.0"
 netcdf4 = ">=1.7.4, <2"
 
 [feature.orchestrator.tasks.pipeline-serve]
-cmd = "python orchestration/prefect_monthly_inference.py"
+cmd = "python orchestration/prefect_monthly_inference.py serve"
 
-[feature.orchestrator.tasks.report]
-cmd = "python -m orchestration.reporting.generate_pdf_report"
-
-[feature.orchestrator.tasks.pipeline-trigger]
-cmd = "prefect deployment run 海洋模型预测/海洋模型预测"
+[feature.orchestrator.tasks.pipeline]
+cmd = "python orchestration/prefect_monthly_inference.py run"
 
 [environments]
 model = ["model"]

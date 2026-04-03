@@ -24,7 +24,44 @@ cp .env.example .env
 - 脚本会通过 `python-dotenv` 自动读取仓库根目录 `.env`。
 - `.env` 已被 `.gitignore` 忽略，不会进入版本库。
 
-## 3. 启动调度服务
+## 3. CLI 命令（仅保留两条业务命令）
+
+### 3.1 完整流程（推理 -> 生成报告 -> 上传）
+
+```bash
+pixi run -e orchestrator pipeline
+pixi run -e orchestrator pipeline 2026-02 --source psl --output-dir ./output/reports
+```
+
+参数：
+- `target_month`（可选）：格式 `YYYY-MM`，默认上个月（`Asia/Shanghai`）
+- `--output-dir`：报告输出目录，默认 `./output/reports`
+- `--source`：初始数据源，`cpc`（默认）或 `psl`
+
+行为说明：
+- 推理中间目录、模型中间结果、临时 NetCDF 均由 `TemporaryDirectory` 统一管理并自动清理
+- 最终上传：`s3://szcx-ds-wthr-public/ocean_report/YYYY-MM.pdf`
+- 本地保留 PDF：`{output_dir}/YYYY-MM.pdf`
+
+### 3.2 仅推理流程
+
+```bash
+pixi run -e model inference
+pixi run -e model inference 2026-02 --source cpc --output-dir ./output/models
+```
+
+参数：
+- `target_month`（可选）：格式 `YYYY-MM`，默认上个月（`Asia/Shanghai`）
+- `--output-dir`：模型输出目录，默认 `./output/models`
+- `--source`：初始数据源，`cpc`（默认）或 `psl`
+
+行为说明：
+- 输出 NetCDF：`{output_dir}/YYYY-MM.nc`
+- 下载/预处理/推理中间文件统一在 `./tmp` 下临时管理并自动清理
+
+## 4. Prefect 调度
+
+启动部署服务：
 
 ```bash
 pixi run -e orchestrator pipeline-serve
@@ -34,45 +71,10 @@ pixi run -e orchestrator pipeline-serve
 - cron: `0 2 20 * *`
 - timezone: `Asia/Shanghai`
 - 自动执行上个月数据
+- Prefect Flow 仅调用单一 `pipeline` 函数（不再做 stage 级编排）
 - 默认数据源：`cpc`（可切换 `psl`）
-- `model` 环境仅执行推理；报告分析与 PDF 生成在 `orchestrator` 环境执行
-- Prefect 中可见推理阶段：依赖检查、数据下载、预处理、模型推理、结果转换、报告生成
-- `cpc` 下载缓存固定目录：`./tmp/cpc_cache`（容器内 `/app/tmp/cpc_cache`）
-- 推理临时文件统一在 `./tmp` 下通过 `TemporaryDirectory` 管理并自动清理
-- 最终产物上传到：`s3://szcx-ds-wthr-public/ocean_report/YYYY-MM.pdf`
-- 本地固定保留一份 PDF：`./output/reports/YYYY-MM.pdf`
 - 报告模板固定来源：`orchestration/reporting/assets/report_template.md`
 - 报告分析脚本固定来源：`orchestration/reporting/assets/analyzer.py`
-
-## 4. 手动运行
-
-先做 dry-run：
-
-```bash
-pixi run -e orchestrator pipeline-trigger -- --param dry_run=true
-```
-
-实际执行：
-
-```bash
-pixi run -e orchestrator pipeline-trigger -- --param dry_run=false
-```
-
-指定月份：
-
-```bash
-pixi run -e orchestrator pipeline-trigger -- --param target_month=2026-02 --param dry_run=false
-```
-
-指定数据源（例如 PSL）：
-
-```bash
-pixi run -e orchestrator pipeline-trigger -- --param source=psl --param target_month=2026-02 --param dry_run=false
-```
-
-注意：`target_month` 必须是 `YYYY-MM`（如 `2026-02`）。
-注意：`source` 仅支持 `cpc` / `psl`，默认 `cpc`。
-注意：`pipeline-trigger` 不再自动读取 `.env`，请确保当前运行环境已提供 `PREFECT_API_URL` 与 `PREFECT_API_AUTH_STRING`。
 
 ## 5. 厦门上传模块
 
