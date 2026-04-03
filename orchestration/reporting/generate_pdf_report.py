@@ -24,6 +24,7 @@ REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
 PDF_MARGIN = "8mm"
+PDF_MAIN_FONT = "Noto Sans CJK SC"
 S3_BUCKET = "fengwu-public"
 S3_PREFIX = "szcx_ocean_report"
 REQUIRED_SECTIONS = [
@@ -218,6 +219,8 @@ def convert_markdown_to_pdf(markdown_path: Path, output_pdf: Path, work_dir: Pat
             "pandoc",
             str(markdown_path),
             "--pdf-engine=typst",
+            "-V",
+            f"mainfont={PDF_MAIN_FONT}",
             "-M",
             f"margin.top={PDF_MARGIN}",
             "-M",
