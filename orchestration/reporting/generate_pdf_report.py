@@ -25,7 +25,13 @@ REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
 PDF_MARGIN = "8mm"
-PDF_MAIN_FONT = "Noto Sans CJK SC"
+PDF_FONT_CANDIDATES = (
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "PingFang SC",
+    "Heiti SC",
+    "STHeiti",
+)
 REQUIRED_SECTIONS = [
     "## 1. 摘要",
     "## 2. 气候趋势分析：ENSO 演变",
@@ -209,13 +215,37 @@ def validate_report_markdown(report_text: str, image_links: dict[str, str]) -> N
 
 
 def convert_markdown_to_pdf(markdown_path: Path, output_pdf: Path, work_dir: Path) -> None:
+    font_list_result = subprocess.run(
+        ["typst", "fonts"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if font_list_result.returncode != 0:
+        raise RuntimeError(
+            "无法获取 typst 字体列表\n"
+            f"stdout:\n{font_list_result.stdout.strip()}\n"
+            f"stderr:\n{font_list_result.stderr.strip()}"
+        )
+
+    available_fonts = {line.strip().lower() for line in font_list_result.stdout.splitlines() if line.strip()}
+    pdf_main_font = next(
+        (font for font in PDF_FONT_CANDIDATES if font.lower() in available_fonts),
+        None,
+    )
+    if pdf_main_font is None:
+        raise RuntimeError(
+            "未找到可用中文字体，请在运行环境安装 CJK 字体（建议 fonts-noto-cjk），"
+            f"候选字体: {', '.join(PDF_FONT_CANDIDATES)}"
+        )
+
     result = subprocess.run(
         [
             "pandoc",
             str(markdown_path),
             "--pdf-engine=typst",
             "-V",
-            f"mainfont={PDF_MAIN_FONT}",
+            f"mainfont={pdf_main_font}",
             "-M",
             f"margin.top={PDF_MARGIN}",
             "-M",
