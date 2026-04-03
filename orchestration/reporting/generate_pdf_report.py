@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,7 +24,7 @@ REPORT_TEMPLATE_PATH = REPORT_ASSETS_DIR / "report_template.md"
 REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
-PDF_MARGIN = "8mm"
+PDF_MARGIN = "12mm"
 PDF_FONT_CANDIDATES = (
     "Noto Sans CJK SC",
     "Source Han Sans SC",
@@ -225,30 +226,37 @@ def convert_markdown_to_pdf(markdown_path: Path, output_pdf: Path, work_dir: Pat
             f"候选字体: {', '.join(PDF_FONT_CANDIDATES)}"
         )
 
-    result = subprocess.run(
-        [
-            "pandoc",
-            str(markdown_path),
-            "--pdf-engine=typst",
-            "-V",
-            f"mainfont={pdf_main_font}",
-            "-M",
-            f"margin.top={PDF_MARGIN}",
-            "-M",
-            f"margin.bottom={PDF_MARGIN}",
-            "-M",
-            f"margin.left={PDF_MARGIN}",
-            "-M",
-            f"margin.right={PDF_MARGIN}",
-            "--resource-path",
-            str(work_dir),
-            "-o",
-            str(output_pdf),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".typ",
+        dir=work_dir,
+        delete=False,
+    ) as margin_override_file:
+        margin_override_file.write(f"#set page(margin: (x: {PDF_MARGIN}, y: {PDF_MARGIN}))\n")
+        margin_override_path = Path(margin_override_file.name)
+
+    try:
+        result = subprocess.run(
+            [
+                "pandoc",
+                str(markdown_path),
+                "--pdf-engine=typst",
+                "-V",
+                f"mainfont={pdf_main_font}",
+                "--include-before-body",
+                str(margin_override_path),
+                "--resource-path",
+                str(work_dir),
+                "-o",
+                str(output_pdf),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        margin_override_path.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(
             "pandoc 转换 PDF 失败\n"
