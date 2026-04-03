@@ -46,6 +46,7 @@ import sys
 import argparse
 import json
 import subprocess
+import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Dict, Tuple
@@ -56,7 +57,8 @@ import torch
 import xarray as xr
 import pandas as pd
 from urllib.request import urlretrieve
-from urllib.error import HTTPError
+from urllib.error import ContentTooShortError, HTTPError, URLError
+from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 # ============ 配置参数 ============
 # 模型配置
@@ -110,6 +112,13 @@ CPC_CACHE_DIR = os.path.join(TMP_BASE_DIR, "cpc_cache")
 
 # 深度层级（米）
 DEPTH_LEVELS = [10, 15, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000]
+
+# 下载重试配置
+DOWNLOAD_RETRY_ATTEMPTS = 5
+DOWNLOAD_RETRY_WAIT_MIN_SECONDS = 2
+DOWNLOAD_RETRY_WAIT_MAX_SECONDS = 20
+
+download_logger = logging.getLogger("predict.inference.download")
 
 
 # ============ 工具函数 ============
@@ -172,6 +181,31 @@ def check_dependencies():
 
 # ============ 数据下载 ============
 
+def _is_retryable_download_exception(exc: BaseException) -> bool:
+    return isinstance(exc, RuntimeError)
+
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(DOWNLOAD_RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=DOWNLOAD_RETRY_WAIT_MIN_SECONDS, max=DOWNLOAD_RETRY_WAIT_MAX_SECONDS),
+    retry=retry_if_exception(_is_retryable_download_exception),
+    before_sleep=before_sleep_log(download_logger, logging.WARNING),
+)
+def _download_file_with_retry(url: str, output_file: str) -> str:
+    if os.path.exists(output_file):
+        os.remove(output_file)
+    try:
+        urlretrieve(url, output_file)
+    except HTTPError as e:
+        if e.code == 404:
+            raise FileNotFoundError(f"GODAS 数据不存在：{url}") from e
+        raise RuntimeError(f"下载失败：{url}，HTTP 错误码：{e.code}") from e
+    except (URLError, ContentTooShortError, TimeoutError) as e:
+        raise RuntimeError(f"下载失败：{url}，网络错误：{e}") from e
+    return output_file
+
+
 def download_godas_data(year: int, month: int, var_name: str, output_dir: str) -> str:
     """
     下载 GODAS 数据
@@ -196,19 +230,16 @@ def download_godas_data(year: int, month: int, var_name: str, output_dir: str) -
         print(f"  - {var_name}: 文件已存在，跳过下载")
         return output_file
 
+    print(f"  - {var_name}: 正在下载... ", end="", flush=True)
     try:
-        print(f"  - {var_name}: 正在下载... ", end="", flush=True)
-        urlretrieve(url, output_file)
-        print("完成")
-        return output_file
-    except HTTPError as e:
-        if e.code == 404:
-            raise FileNotFoundError(
-                f"GODAS 数据不存在：{url}\n"
-                f"请确认 {year} 年的数据已发布"
-            )
-        else:
-            raise RuntimeError(f"下载失败：{url}，错误码：{e.code}")
+        _download_file_with_retry(url=url, output_file=output_file)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"{e}\n"
+            f"请确认 {year} 年的数据已发布"
+        ) from e
+    print("完成")
+    return output_file
 
 
 def download_all_variables(year: int, month: int, output_dir: str) -> Dict[str, str]:
@@ -259,18 +290,16 @@ def download_godas_grib(year: int, month: int, output_dir: str) -> str:
         print(f"  - {filename}: 文件已存在，跳过下载")
         return output_file
 
+    print(f"  - {filename}: 正在下载... ", end="", flush=True)
     try:
-        print(f"  - {filename}: 正在下载... ", end="", flush=True)
-        urlretrieve(url, output_file)
-        print("完成")
-        return output_file
-    except HTTPError as e:
-        if e.code == 404:
-            raise FileNotFoundError(
-                f"GODAS GRIB 数据不存在：{url}\n"
-                f"请确认 {year}-{month:02d} 的数据已发布"
-            )
-        raise RuntimeError(f"下载失败：{url}，错误码：{e.code}")
+        _download_file_with_retry(url=url, output_file=output_file)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"{e}\n"
+            f"请确认 {year}-{month:02d} 的数据已发布"
+        ) from e
+    print("完成")
+    return output_file
 
 
 # ============ 数据预处理（CDO）============

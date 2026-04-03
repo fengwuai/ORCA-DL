@@ -31,7 +31,7 @@ pixi run -e orchestrator pipeline-serve
 ```
 
 默认调度：
-- cron: `0 2 1 * *`
+- cron: `0 2 20 * *`
 - timezone: `Asia/Shanghai`
 - 自动执行上个月数据
 - 默认数据源：`cpc`（可切换 `psl`）

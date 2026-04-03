@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,12 +11,13 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from prefect import flow, get_run_logger, task
 from prefect.client.schemas.schedules import CronSchedule
+from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "海洋模型预测"
 TIMEZONE = "Asia/Shanghai"
-CRON = "0 2 1 * *"
+CRON = "0 2 20 * *"
 INFERENCE_CMD = ["pixi", "run", "-e", "model", "inference"]
 REPORT_CMD = ["pixi", "run", "-e", "orchestrator", "report"]
 TMP_BASE_DIR = ROOT / "tmp"
@@ -24,6 +26,9 @@ S3_BUCKET = "szcx-ds-wthr-public"
 S3_PREFIX = "ocean_report"
 TASK_RETRIES = 1
 TASK_RETRY_DELAY_SECONDS = 30
+DOWNLOAD_CMD_RETRY_ATTEMPTS = 3
+DOWNLOAD_CMD_RETRY_WAIT_MIN_SECONDS = 2
+DOWNLOAD_CMD_RETRY_WAIT_MAX_SECONDS = 15
 
 load_dotenv(dotenv_path=ROOT / ".env", override=False)
 
@@ -103,6 +108,33 @@ def run_command(command: list[str], task_name: str, env: dict[str, str] | None =
         logger.warning("[%s] stderr:\n%s", task_name, result.stderr)
 
 
+def _is_retryable_download_command_error(exc: BaseException) -> bool:
+    if not isinstance(exc, RuntimeError):
+        return False
+    non_retryable_signals = (
+        "数据不存在",
+        "不支持的 source",
+        "变量名不支持",
+        "格式错误",
+    )
+    return not any(signal in str(exc) for signal in non_retryable_signals)
+
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(DOWNLOAD_CMD_RETRY_ATTEMPTS),
+    wait=wait_exponential(
+        multiplier=1,
+        min=DOWNLOAD_CMD_RETRY_WAIT_MIN_SECONDS,
+        max=DOWNLOAD_CMD_RETRY_WAIT_MAX_SECONDS,
+    ),
+    retry=retry_if_exception(_is_retryable_download_command_error),
+    before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+)
+def run_download_command_with_retry(command: list[str], task_name: str) -> None:
+    run_command(command=command, task_name=task_name)
+
+
 @task(name="检查推理依赖", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
 def check_inference_dependencies_task(dry_run: bool = False) -> None:
     logger = get_run_logger()
@@ -131,7 +163,7 @@ def download_data_task(
         logger.warning("dry_run=True，跳过下载，source=%s", source)
         return str(raw_dir)
 
-    run_command(
+    run_download_command_with_retry(
         [
             *INFERENCE_CMD,
             target_month,
