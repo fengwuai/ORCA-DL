@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 TMP_BASE_DIR = ROOT / "tmp"
 LEGACY_REPORT_DIR = ROOT / "output" / "reports"
-REPORT_ASSETS_DIR = ROOT / "predict" / "report_assets"
+REPORT_ASSETS_DIR = ROOT / "orchestration" / "reporting" / "assets"
 REPORT_TEMPLATE_PATH = REPORT_ASSETS_DIR / "report_template.md"
 REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"

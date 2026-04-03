@@ -21,6 +21,9 @@ REPORT_CMD = ["pixi", "run", "-e", "orchestrator", "report"]
 TMP_BASE_DIR = ROOT / "tmp"
 S3_BUCKET = "fengwu-public"
 S3_PREFIX = "szcx_ocean_report"
+GODAS_DOWNLOAD_VARS = ["pottmp", "salt", "ucur", "vcur", "sshg", "uflx", "vflx"]
+TASK_RETRIES = 1
+TASK_RETRY_DELAY_SECONDS = 30
 
 load_dotenv(dotenv_path=ROOT / ".env", override=False)
 
@@ -34,6 +37,7 @@ def resolve_target_month(target_month: str | None) -> str:
         if dt.strftime("%Y-%m") != target_month:
             raise ValueError(f"target_month 格式错误：{target_month}，应为 YYYY-MM（如 2026-02）")
         return target_month
+
     now = datetime.now(ZoneInfo(TIMEZONE))
     previous_month_last_day = now.replace(
         day=1,
@@ -45,6 +49,18 @@ def resolve_target_month(target_month: str | None) -> str:
     return previous_month_last_day.strftime("%Y-%m")
 
 
+def resolve_raw_dir(pipeline_tmp_dir: str) -> Path:
+    return Path(pipeline_tmp_dir) / "raw"
+
+
+def resolve_processed_dir(pipeline_tmp_dir: str) -> Path:
+    return Path(pipeline_tmp_dir) / "processed"
+
+
+def resolve_preds_path(pipeline_tmp_dir: str) -> Path:
+    return Path(pipeline_tmp_dir) / "preds.npy"
+
+
 def resolve_prediction_path(target_month: str, pipeline_tmp_dir: str) -> Path:
     year, month = target_month.split("-")
     return Path(pipeline_tmp_dir) / f"orca_dl_prediction_{year}_{month}_24months.nc"
@@ -54,20 +70,9 @@ def resolve_report_uri(target_month: str) -> str:
     return f"s3://{S3_BUCKET}/{S3_PREFIX}/{target_month}.pdf"
 
 
-@task(name="执行海洋模型推理")
-def run_inference_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool = False) -> str:
+def run_command(command: list[str], task_name: str, env: dict[str, str] | None = None) -> None:
     logger = get_run_logger()
-    command = [*INFERENCE_CMD, target_month]
-    prediction_path = resolve_prediction_path(target_month, pipeline_tmp_dir)
-
-    logger.info("执行命令: %s", " ".join(command))
-
-    if dry_run:
-        logger.warning("dry_run=True，跳过实际推理执行")
-        return str(prediction_path)
-
-    env = os.environ.copy()
-    env["ORCA_INFERENCE_OUTPUT_NC"] = str(prediction_path)
+    logger.info("[%s] 执行命令: %s", task_name, " ".join(command))
 
     result = subprocess.run(
         command,
@@ -79,73 +84,187 @@ def run_inference_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool =
     )
 
     if result.stdout:
-        logger.info("stdout:\n%s", result.stdout)
+        logger.info("[%s] stdout:\n%s", task_name, result.stdout)
 
     if result.returncode != 0:
-        error_message = (
-            f"推理命令执行失败，退出码: {result.returncode}\n"
+        raise RuntimeError(
+            f"{task_name} 失败，退出码: {result.returncode}\n"
             f"命令: {' '.join(command)}\n"
             f"stderr:\n{result.stderr.strip()}"
         )
-        raise RuntimeError(error_message)
 
     if result.stderr:
-        logger.warning("stderr:\n%s", result.stderr)
+        logger.warning("[%s] stderr:\n%s", task_name, result.stderr)
+
+
+@task(name="检查推理依赖", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
+def check_inference_dependencies_task(dry_run: bool = False) -> None:
+    logger = get_run_logger()
+    if dry_run:
+        logger.warning("dry_run=True，跳过依赖检查")
+        return
+
+    run_command(
+        [*INFERENCE_CMD, "--stage", "check"],
+        task_name="检查推理依赖",
+    )
+
+
+@task(
+    name="下载GODAS变量",
+    task_run_name="下载-{var_name}",
+    retries=TASK_RETRIES,
+    retry_delay_seconds=TASK_RETRY_DELAY_SECONDS,
+)
+def download_variable_task(
+    target_month: str,
+    pipeline_tmp_dir: str,
+    var_name: str,
+    dry_run: bool = False,
+) -> str:
+    logger = get_run_logger()
+    year, _ = target_month.split("-")
+    raw_dir = resolve_raw_dir(pipeline_tmp_dir)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    output_path = raw_dir / f"{var_name}.{year}.nc"
+
+    if dry_run:
+        logger.warning("dry_run=True，跳过下载，变量=%s", var_name)
+        return str(output_path)
+
+    run_command(
+        [
+            *INFERENCE_CMD,
+            target_month,
+            "--stage",
+            "download",
+            "--raw-dir",
+            str(raw_dir),
+            "--var",
+            var_name,
+        ],
+        task_name=f"下载变量 {var_name}",
+    )
+
+    if not output_path.is_file():
+        raise FileNotFoundError(f"下载文件缺失: {output_path}")
+
+    logger.info("变量下载完成: %s", output_path)
+    return str(output_path)
+
+
+@task(name="预处理海洋数据", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
+def preprocess_data_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool = False) -> str:
+    logger = get_run_logger()
+    raw_dir = resolve_raw_dir(pipeline_tmp_dir)
+    processed_dir = resolve_processed_dir(pipeline_tmp_dir)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    if dry_run:
+        logger.warning("dry_run=True，跳过预处理")
+        return str(processed_dir)
+
+    run_command(
+        [
+            *INFERENCE_CMD,
+            target_month,
+            "--stage",
+            "preprocess",
+            "--raw-dir",
+            str(raw_dir),
+            "--processed-dir",
+            str(processed_dir),
+        ],
+        task_name="预处理海洋数据",
+    )
+
+    return str(processed_dir)
+
+
+@task(name="执行模型推理", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
+def run_inference_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool = False) -> str:
+    logger = get_run_logger()
+    processed_dir = resolve_processed_dir(pipeline_tmp_dir)
+    preds_path = resolve_preds_path(pipeline_tmp_dir)
+
+    if dry_run:
+        logger.warning("dry_run=True，跳过模型推理")
+        return str(preds_path)
+
+    run_command(
+        [
+            *INFERENCE_CMD,
+            target_month,
+            "--stage",
+            "infer",
+            "--processed-dir",
+            str(processed_dir),
+            "--preds-path",
+            str(preds_path),
+        ],
+        task_name="执行模型推理",
+    )
+
+    if not preds_path.is_file():
+        raise FileNotFoundError(f"推理中间结果未生成: {preds_path}")
+
+    return str(preds_path)
+
+
+@task(name="转换预测结果", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
+def convert_prediction_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool = False) -> str:
+    logger = get_run_logger()
+    preds_path = resolve_preds_path(pipeline_tmp_dir)
+    prediction_path = resolve_prediction_path(target_month, pipeline_tmp_dir)
+
+    if dry_run:
+        logger.warning("dry_run=True，跳过结果转换")
+        return str(prediction_path)
+
+    run_command(
+        [
+            *INFERENCE_CMD,
+            target_month,
+            "--stage",
+            "convert",
+            "--preds-path",
+            str(preds_path),
+            "--output",
+            str(prediction_path),
+        ],
+        task_name="转换预测结果",
+    )
 
     if not prediction_path.is_file():
-        raise FileNotFoundError(f"推理临时文件未生成: {prediction_path}")
+        raise FileNotFoundError(f"预测文件未生成: {prediction_path}")
 
-    logger.info("推理命令执行成功")
     return str(prediction_path)
 
 
-@task(name="生成海洋模型报告")
+@task(name="生成海洋模型报告", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
 def run_report_task(prediction_path: str, target_month: str, dry_run: bool = False) -> str:
     logger = get_run_logger()
     output_uri = resolve_report_uri(target_month)
-    command = [*REPORT_CMD, target_month]
-
-    logger.info("报告命令: %s", " ".join(command))
 
     if dry_run:
         logger.warning("dry_run=True，跳过报告生成")
         return output_uri
 
     env = os.environ.copy()
-    env["ORCA_INFERENCE_OUTPUT_NC"] = str(prediction_path)
+    env["ORCA_INFERENCE_OUTPUT_NC"] = prediction_path
 
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
+    run_command(
+        [*REPORT_CMD, target_month],
+        task_name="生成海洋模型报告",
         env=env,
-        capture_output=True,
-        text=True,
-        check=False,
     )
-
-    if result.stdout:
-        logger.info("stdout:\n%s", result.stdout)
-
-    if result.returncode != 0:
-        error_message = (
-            f"报告生成失败，退出码: {result.returncode}\n"
-            f"命令: {' '.join(command)}\n"
-            f"stderr:\n{result.stderr.strip()}"
-        )
-        raise RuntimeError(error_message)
-
-    if result.stderr:
-        logger.warning("stderr:\n%s", result.stderr)
 
     logger.info("报告上传成功: %s", output_uri)
     return output_uri
 
 
 @flow(name=NAME, log_prints=True)
-def monthly_inference_flow(
-    target_month: str | None = None,
-    dry_run: bool = False,
-) -> str:
+def monthly_inference_flow(target_month: str | None = None, dry_run: bool = False) -> str:
     logger = get_run_logger()
     resolved_month = resolve_target_month(target_month=target_month)
 
@@ -154,18 +273,42 @@ def monthly_inference_flow(
 
     TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="pipeline_") as pipeline_tmp_dir:
-        prediction_path = run_inference_task(
+        check_inference_dependencies_task(dry_run=dry_run)
+
+        for var_name in GODAS_DOWNLOAD_VARS:
+            download_variable_task(
+                target_month=resolved_month,
+                pipeline_tmp_dir=pipeline_tmp_dir,
+                var_name=var_name,
+                dry_run=dry_run,
+            )
+
+        preprocess_data_task(
             target_month=resolved_month,
             pipeline_tmp_dir=pipeline_tmp_dir,
             dry_run=dry_run,
         )
-        report_path = run_report_task(
+
+        run_inference_task(
+            target_month=resolved_month,
+            pipeline_tmp_dir=pipeline_tmp_dir,
+            dry_run=dry_run,
+        )
+
+        prediction_path = convert_prediction_task(
+            target_month=resolved_month,
+            pipeline_tmp_dir=pipeline_tmp_dir,
+            dry_run=dry_run,
+        )
+
+        report_uri = run_report_task(
             prediction_path=prediction_path,
             target_month=resolved_month,
             dry_run=dry_run,
         )
-        logger.info("流程完成，报告路径=%s", report_path)
-        return report_path
+
+        logger.info("流程完成，报告路径=%s", report_uri)
+        return report_uri
 
 
 def serve_deployment() -> None:

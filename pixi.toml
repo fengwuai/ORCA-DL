@@ -57,7 +57,7 @@ netcdf4 = ">=1.7.4, <2"
 cmd = "python orchestration/prefect_monthly_inference.py"
 
 [feature.orchestrator.tasks.report]
-cmd = "python predict/generate_markdown_report.py"
+cmd = "python orchestration/reporting/generate_pdf_report.py"
 
 [feature.orchestrator.tasks.pipeline-trigger]
 cmd = "prefect deployment run 海洋模型预测/海洋模型预测"

@@ -7,7 +7,7 @@ ORCA-DL GODAS 数据推理脚本
     并将结果保存为 NetCDF 文件。
 
 使用方式：
-    pixi run -e model python predict/inference.py 2025-12
+    pixi run -e model inference 2025-12
 
 参数：
     input_date: 初始化月份，格式为 YYYY-MM（如 2025-12）
@@ -39,6 +39,7 @@ ORCA-DL GODAS 数据推理脚本
 
 import os
 import sys
+import argparse
 import json
 import subprocess
 from pathlib import Path
@@ -73,6 +74,7 @@ BATCH_SIZE = 1      # 推理批次大小
 GODAS_VARS_3D = ['pottmp', 'salt', 'ucur', 'vcur']  # 3D 变量（16层）
 GODAS_VARS_2D = ['sshg']                            # 2D 变量（1层）
 GODAS_VARS_ATMO = ['uflx', 'vflx']                  # 大气强迫变量
+ALL_GODAS_VARS = GODAS_VARS_3D + GODAS_VARS_2D + GODAS_VARS_ATMO
 
 # 注意：sst 不需要下载，会从 pottmp 的第一层提取
 
@@ -130,8 +132,7 @@ def check_dependencies():
         raise FileNotFoundError(f"垂直轴文件不存在：{ZAXIS_FILE}")
 
     # 检查统计文件
-    all_vars = GODAS_VARS_3D + GODAS_VARS_2D + GODAS_VARS_ATMO
-    for var in all_vars:
+    for var in ALL_GODAS_VARS:
         mean_file = os.path.join(STAT_DIR, "mean", f"{var}.npy")
         std_file = os.path.join(STAT_DIR, "std", f"{var}.npy")
         if not os.path.exists(mean_file):
@@ -728,92 +729,155 @@ def get_var_description(var: str) -> str:
 
 # ============ 主流程 ============
 
-def main(input_date: str):
-    """
-    主推理流程
-
-    Args:
-        input_date: 格式为 YYYY-MM，如 "2025-12"
-    """
-    print("=" * 60)
-    print("ORCA-DL 海洋状态预测系统")
-    print("=" * 60)
-
-    # 1. 解析输入日期
-    print(f"\n[1/8] 解析输入日期：{input_date}")
-    year, month = parse_date(input_date)
-    print(f"✓ 起始日期：{year} 年 {month} 月")
-
-    # 2. 检查依赖
-    print("\n[2/8] 检查依赖项...")
-    check_dependencies()
-
-    # 3. 检查 GPU 可用性
-    print("\n[3/8] 检查计算设备...")
+def resolve_device() -> torch.device:
+    """解析推理设备并打印设备信息。"""
     if torch.cuda.is_available():
         device = torch.device("cuda")
         print(f"✓ 使用 GPU：{torch.cuda.get_device_name(0)}")
         print(f"  显存：{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-    else:
-        device = torch.device("cpu")
-        print("⚠ GPU 不可用，使用 CPU（推理速度会较慢）")
+        return device
 
-    # 4. 在统一临时目录下执行推理
-    print(f"\n[4/8] 下载 GODAS 数据（{year}-{month:02d}）...")
+    device = torch.device("cpu")
+    print("⚠ GPU 不可用，使用 CPU（推理速度会较慢）")
+    return device
+
+
+def run_model_inference(processed_dir: str, month: int, preds_output_path: str) -> str:
+    """执行模型推理并保存原始预测张量为 NPY。"""
+    print("\n[推理] 准备模型输入（归一化）...")
+    ocean_vars, atmo_vars = prepare_model_input(processed_dir, month)
+    print(f"✓ 海洋变量形状：{ocean_vars.shape}")
+    print(f"✓ 大气变量形状：{atmo_vars.shape}")
+
+    print("\n[推理] 加载模型...")
+    print(f"  模型配置：{MODEL_CONFIG_PATH}")
+    print(f"  模型权重：{MODEL_CKPT_PATH}")
+    device = resolve_device()
+    model = load_model(MODEL_CONFIG_PATH, MODEL_CKPT_PATH, device)
+    print("✓ 模型已加载")
+
+    print(f"\n[推理] 开始预测未来 {PREDICT_STEPS} 个月...")
+    with torch.no_grad():
+        output = model(
+            ocean_vars=ocean_vars.to(device),
+            atmo_vars=atmo_vars.to(device),
+            predict_time_steps=PREDICT_STEPS,
+        )
+
+    preds = output.preds.cpu().numpy()
+    preds_path = Path(preds_output_path)
+    preds_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(preds_path, preds)
+    print(f"✓ 推理完成，输出形状：{preds.shape}")
+    print(f"✓ 中间结果已保存：{preds_path}")
+    return str(preds_path)
+
+
+def convert_predictions_to_netcdf(preds_path: str, output_path: str, year: int, month: int) -> str:
+    """将模型预测张量转换为最终 NetCDF 文件。"""
+    print("\n[转换] 读取推理结果并反归一化...")
+    preds = np.load(preds_path)
+    predictions = denormalize_predictions(preds, STAT_DIR, month)
+
+    print("[转换] 提取海表温度...")
+    predictions["tos"] = extract_sst_from_pottmp(predictions["thetao"])
+
+    print(f"[转换] 保存 NetCDF：{output_path}")
+    save_to_netcdf(predictions, output_path, year, month)
+    return output_path
+
+
+def run_check_stage() -> None:
+    """执行依赖与设备检查。"""
+    print("[检查] 检查依赖项...")
+    check_dependencies()
+    print("[检查] 检查计算设备...")
+    resolve_device()
+
+
+def run_download_stage(target_month: str, raw_dir: str, var_name: str) -> str:
+    """下载单个 GODAS 变量。"""
+    year, month = parse_date(target_month)
+    if var_name not in ALL_GODAS_VARS:
+        raise ValueError(f"变量名不支持：{var_name}，可选值：{ALL_GODAS_VARS}")
+    Path(raw_dir).mkdir(parents=True, exist_ok=True)
+    print(f"[下载] 变量={var_name}, 月份={target_month}")
+    return download_godas_data(year, month, var_name, raw_dir)
+
+
+def run_preprocess_stage(target_month: str, raw_dir: str, processed_dir: str) -> str:
+    """执行全部变量预处理。"""
+    year, month = parse_date(target_month)
+    print(f"[预处理] 月份={target_month}")
+    preprocess_all_variables(raw_dir, processed_dir, year, month)
+    return processed_dir
+
+
+def run_infer_stage(target_month: str, processed_dir: str, preds_output_path: str) -> str:
+    """执行推理并产出中间 NPY。"""
+    _, month = parse_date(target_month)
+    return run_model_inference(
+        processed_dir=processed_dir,
+        month=month,
+        preds_output_path=preds_output_path,
+    )
+
+
+def run_convert_stage(target_month: str, preds_path: str, output_path: str) -> str:
+    """执行预测结果转换并保存 NetCDF。"""
+    year, month = parse_date(target_month)
+    return convert_predictions_to_netcdf(
+        preds_path=preds_path,
+        output_path=output_path,
+        year=year,
+        month=month,
+    )
+
+
+def run_full_pipeline(target_month: str) -> str:
+    """执行完整推理流程。"""
+    year, month = parse_date(target_month)
+
+    print("=" * 60)
+    print("ORCA-DL 海洋状态预测系统")
+    print("=" * 60)
+    print(f"\n[1/6] 解析输入日期：{target_month}")
+    print(f"✓ 起始日期：{year} 年 {month} 月")
+
+    print("\n[2/6] 检查依赖与设备...")
+    check_dependencies()
+    resolve_device()
+
+    print(f"\n[3/6] 下载 GODAS 数据（{year}-{month:02d}）...")
     os.makedirs(TMP_BASE_DIR, exist_ok=True)
 
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_infer_") as tmp_dir:
         raw_dir = os.path.join(tmp_dir, "raw")
         processed_dir = os.path.join(tmp_dir, "processed")
-        download_all_variables(year, month, raw_dir)
-
-        # 5. 预处理数据
-        print(f"\n[5/8] 预处理数据（CDO 插值）...")
-        preprocess_all_variables(raw_dir, processed_dir, year, month)
-
-        # 6. 准备模型输入
-        print(f"\n[6/8] 准备模型输入（归一化）...")
-        ocean_vars, atmo_vars = prepare_model_input(processed_dir, month)
-        print(f"✓ 海洋变量形状：{ocean_vars.shape}")
-        print(f"✓ 大气变量形状：{atmo_vars.shape}")
-
-        # 7. 加载模型并推理
-        print("\n[7/8] 加载模型并推理...")
-        print(f"  模型配置：{MODEL_CONFIG_PATH}")
-        print(f"  模型权重：{MODEL_CKPT_PATH}")
-        model = load_model(MODEL_CONFIG_PATH, MODEL_CKPT_PATH, device)
-        print("✓ 模型已加载")
-
-        print(f"\n  正在推理（预测未来 {PREDICT_STEPS} 个月）...")
-        with torch.no_grad():
-            output = model(
-                ocean_vars=ocean_vars.to(device),
-                atmo_vars=atmo_vars.to(device),
-                predict_time_steps=PREDICT_STEPS
-            )
-
-        print(f"✓ 推理完成，输出形状：{output.preds.shape}")
-
-        # 8. 后处理并保存
-        print("\n[8/8] 后处理并保存结果...")
-        print("  正在反归一化...")
-        predictions = denormalize_predictions(
-            output.preds.cpu().numpy(),
-            STAT_DIR,
-            month
-        )
-
-        # 提取 SST（从 pottmp 第 1 层）
-        print("  正在提取海表温度...")
-        predictions['tos'] = extract_sst_from_pottmp(predictions['thetao'])
-
-        # 保存结果（默认放临时目录；可由编排层通过环境变量指定路径）
+        preds_path = os.path.join(tmp_dir, "preds.npy")
         output_file = os.environ.get(
             "ORCA_INFERENCE_OUTPUT_NC",
             os.path.join(tmp_dir, f"orca_dl_prediction_{year}_{month:02d}_24months.nc"),
         )
-        print(f"  正在保存到：{output_file}")
-        save_to_netcdf(predictions, output_file, year, month)
+
+        download_all_variables(year, month, raw_dir)
+
+        print(f"\n[4/6] 预处理数据（CDO 插值）...")
+        preprocess_all_variables(raw_dir, processed_dir, year, month)
+
+        print("\n[5/6] 执行模型推理...")
+        run_model_inference(
+            processed_dir=processed_dir,
+            month=month,
+            preds_output_path=preds_path,
+        )
+
+        print("\n[6/6] 转换并保存结果...")
+        run_convert_stage(
+            target_month=target_month,
+            preds_path=preds_path,
+            output_path=output_file,
+        )
 
     print("\n" + "=" * 60)
     print("推理完成！")
@@ -822,16 +886,81 @@ def main(input_date: str):
     print("说明：当前流程不会在工作区保留 NetCDF 结果文件。")
     print(f"预测时间范围：{year}-{month:02d} 至 {year + (month + PREDICT_STEPS - 1) // 12}-{((month + PREDICT_STEPS - 1) % 12) + 1:02d}")
     print("包含变量：so, thetao, tos, uo, vo, zos")
+    return output_file
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="ORCA-DL 海洋状态预测")
+    parser.add_argument("target_month", nargs="?", help="目标月份，格式 YYYY-MM（如 2026-02）")
+    parser.add_argument(
+        "--stage",
+        choices=["full", "check", "download", "preprocess", "infer", "convert"],
+        default="full",
+        help="执行阶段（默认 full）",
+    )
+    parser.add_argument("--raw-dir", help="原始数据目录（download/preprocess 阶段使用）")
+    parser.add_argument("--processed-dir", help="预处理目录（preprocess/infer 阶段使用）")
+    parser.add_argument("--preds-path", help="推理结果 NPY 路径（infer/convert 阶段使用）")
+    parser.add_argument("--output", help="输出 NetCDF 路径（convert 阶段使用）")
+    parser.add_argument("--var", help="下载变量名（download 阶段使用）")
+    return parser.parse_args()
+
+
+def require_arg(value: str | None, arg_name: str, stage: str) -> str:
+    if value:
+        return value
+    raise ValueError(f"--{arg_name} 为必填参数（stage={stage}）")
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.stage == "check":
+        run_check_stage()
+        return
+
+    target_month = args.target_month
+    if not target_month:
+        raise ValueError("缺少 target_month，格式应为 YYYY-MM（如 2026-02）")
+
+    if args.stage == "full":
+        run_full_pipeline(target_month=target_month)
+        return
+
+    if args.stage == "download":
+        raw_dir = require_arg(args.raw_dir, "raw-dir", args.stage)
+        var_name = require_arg(args.var, "var", args.stage)
+        output = run_download_stage(target_month=target_month, raw_dir=raw_dir, var_name=var_name)
+        print(f"下载完成：{output}")
+        return
+
+    if args.stage == "preprocess":
+        raw_dir = require_arg(args.raw_dir, "raw-dir", args.stage)
+        processed_dir = require_arg(args.processed_dir, "processed-dir", args.stage)
+        output = run_preprocess_stage(target_month=target_month, raw_dir=raw_dir, processed_dir=processed_dir)
+        print(f"预处理完成：{output}")
+        return
+
+    if args.stage == "infer":
+        processed_dir = require_arg(args.processed_dir, "processed-dir", args.stage)
+        preds_path = require_arg(args.preds_path, "preds-path", args.stage)
+        output = run_infer_stage(target_month=target_month, processed_dir=processed_dir, preds_output_path=preds_path)
+        print(f"推理完成：{output}")
+        return
+
+    if args.stage == "convert":
+        preds_path = require_arg(args.preds_path, "preds-path", args.stage)
+        output_path = require_arg(args.output, "output", args.stage)
+        output = run_convert_stage(target_month=target_month, preds_path=preds_path, output_path=output_path)
+        print(f"转换完成：{output}")
+        return
+
+    raise ValueError(f"不支持的 stage: {args.stage}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("使用方式：pixi run -e model python predict/inference.py YYYY-MM")
-        print("示例：pixi run -e model python predict/inference.py 2025-12")
-        sys.exit(1)
-
     try:
-        main(sys.argv[1])
+        main()
     except Exception as e:
         print(f"\n错误：{e}", file=sys.stderr)
         sys.exit(1)
