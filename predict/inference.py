@@ -8,10 +8,14 @@ ORCA-DL GODAS 数据推理脚本
 
 使用方式：
     pixi run -e model inference 2025-12
+    pixi run -e model inference 2025-12 --source psl
 
 参数：
     input_date: 初始化月份，格式为 YYYY-MM（如 2025-12）
                 该月份的 GODAS 数据必须已发布
+    --source:   数据源（默认 cpc）
+                cpc: CPC 单月 GRIB 文件
+                psl: PSL 按变量分年 NetCDF 文件
 
 输出：
     默认输出到临时目录（./tmp 下），用于后续报告生成；
@@ -33,7 +37,7 @@ ORCA-DL GODAS 数据推理脚本
 
 注意事项：
     1. 确保 GODAS 数据已更新到指定月份
-    2. 推理需要约 12 GB GPU 显存
+    2. 当前流程固定使用 CPU 进行推理
     3. 临时文件会自动清理（位于 ./tmp 目录）
 """
 
@@ -64,6 +68,18 @@ STAT_DIR = "./stat"
 GRID_FILE = "./grid"
 ZAXIS_FILE = "./zaxis.txt"
 GODAS_BASE_URL = "https://downloads.psl.noaa.gov/Datasets/godas"
+GODAS_CPC_URL = "https://ftp.cpc.ncep.noaa.gov/godas/monthly"
+
+# CPC GRIB1 code 映射
+GRIB_CODES = {
+    "pottmp": 13,
+    "salt": 88,
+    "ucur": 49,
+    "vcur": 50,
+    "sshg": 198,
+    "uflx": 124,
+    "vflx": 125,
+}
 
 # 推理配置
 PREDICT_STEPS = 24   # 预测月数
@@ -90,6 +106,7 @@ VAR_MAPPING = {
 
 # 输出配置
 TMP_BASE_DIR = "./tmp"  # 临时文件基础目录（统一通过 TemporaryDirectory 管理）
+CPC_CACHE_DIR = os.path.join(TMP_BASE_DIR, "cpc_cache")
 
 # 深度层级（米）
 DEPTH_LEVELS = [10, 15, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000]
@@ -217,6 +234,45 @@ def download_all_variables(year: int, month: int, output_dir: str) -> Dict[str, 
     return file_paths
 
 
+def resolve_cpc_grib_path(year: int, month: int, output_dir: str) -> str:
+    return os.path.join(output_dir, f"godas.M.{year}{month:02d}.grb")
+
+
+def download_godas_grib(year: int, month: int, output_dir: str) -> str:
+    """
+    下载 CPC GODAS 单月 GRIB 文件
+
+    Args:
+        year: 年份
+        month: 月份（1-12）
+        output_dir: 输出目录
+
+    Returns:
+        GRIB 文件路径
+    """
+    filename = f"godas.M.{year}{month:02d}.grb"
+    url = f"{GODAS_CPC_URL}/{filename}"
+    output_file = resolve_cpc_grib_path(year, month, output_dir)
+
+    os.makedirs(output_dir, exist_ok=True)
+    if os.path.exists(output_file):
+        print(f"  - {filename}: 文件已存在，跳过下载")
+        return output_file
+
+    try:
+        print(f"  - {filename}: 正在下载... ", end="", flush=True)
+        urlretrieve(url, output_file)
+        print("完成")
+        return output_file
+    except HTTPError as e:
+        if e.code == 404:
+            raise FileNotFoundError(
+                f"GODAS GRIB 数据不存在：{url}\n"
+                f"请确认 {year}-{month:02d} 的数据已发布"
+            )
+        raise RuntimeError(f"下载失败：{url}，错误码：{e.code}")
+
+
 # ============ 数据预处理（CDO）============
 
 def run_cdo_command(cmd: list, description: str):
@@ -321,6 +377,52 @@ def preprocess_all_variables(raw_dir: str, processed_dir: str, year: int, month:
         output_file = os.path.join(processed_dir, f"{var}.nc")
         print(f"  - 处理 2D 变量：{var}")
         preprocess_2d_variable(input_file, output_file, year, month, var)
+
+
+def preprocess_3d_from_grib(grib_file: str, output_nc: str, var_name: str):
+    """从 GRIB 提取并预处理 3D 变量。"""
+    code = GRIB_CODES[var_name]
+    levels = ",".join(map(str, DEPTH_LEVELS))
+    cmd = [
+        "cdo", "-f", "nc4", "-b", "f64",
+        f"setname,{var_name}",
+        "-remapbil," + GRID_FILE,
+        "-setzaxis," + ZAXIS_FILE,
+        "-intlevel," + levels,
+        f"-selcode,{code}",
+        grib_file,
+        output_nc,
+    ]
+    run_cdo_command(cmd, f"GRIB 3D 变量插值：{var_name}")
+
+
+def preprocess_2d_from_grib(grib_file: str, output_nc: str, var_name: str):
+    """从 GRIB 提取并预处理 2D 变量。"""
+    code = GRIB_CODES[var_name]
+    cmd = [
+        "cdo", "-f", "nc4", "-b", "f64",
+        f"setname,{var_name}",
+        "-remapbil," + GRID_FILE,
+        f"-selcode,{code}",
+        grib_file,
+        output_nc,
+    ]
+    run_cdo_command(cmd, f"GRIB 2D 变量插值：{var_name}")
+
+
+def preprocess_all_from_grib(grib_file: str, processed_dir: str):
+    """从单个 GRIB 文件预处理所有变量。"""
+    os.makedirs(processed_dir, exist_ok=True)
+
+    for var in GODAS_VARS_3D:
+        output_file = os.path.join(processed_dir, f"{var}.nc")
+        print(f"  - 处理 3D 变量：{var}")
+        preprocess_3d_from_grib(grib_file, output_file, var)
+
+    for var in GODAS_VARS_2D + GODAS_VARS_ATMO:
+        output_file = os.path.join(processed_dir, f"{var}.nc")
+        print(f"  - 处理 2D 变量：{var}")
+        preprocess_2d_from_grib(grib_file, output_file, var)
 
 
 # ============ 数据归一化 ============
@@ -730,15 +832,9 @@ def get_var_description(var: str) -> str:
 # ============ 主流程 ============
 
 def resolve_device() -> torch.device:
-    """解析推理设备并打印设备信息。"""
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"✓ 使用 GPU：{torch.cuda.get_device_name(0)}")
-        print(f"  显存：{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-        return device
-
+    """固定使用 CPU。"""
     device = torch.device("cpu")
-    print("⚠ GPU 不可用，使用 CPU（推理速度会较慢）")
+    print("⚠ 固定使用 CPU 推理")
     return device
 
 
@@ -795,22 +891,65 @@ def run_check_stage() -> None:
     resolve_device()
 
 
-def run_download_stage(target_month: str, raw_dir: str, var_name: str) -> str:
-    """下载单个 GODAS 变量。"""
+def run_download_stage(
+    target_month: str,
+    raw_dir: str,
+    source: str = "cpc",
+    var_name: str | None = None,
+) -> str:
+    """下载数据（按 source 选择 CPC 或 PSL）。"""
     year, month = parse_date(target_month)
-    if var_name not in ALL_GODAS_VARS:
-        raise ValueError(f"变量名不支持：{var_name}，可选值：{ALL_GODAS_VARS}")
-    Path(raw_dir).mkdir(parents=True, exist_ok=True)
-    print(f"[下载] 变量={var_name}, 月份={target_month}")
-    return download_godas_data(year, month, var_name, raw_dir)
+
+    if source == "cpc":
+        raw_dir = CPC_CACHE_DIR
+        Path(raw_dir).mkdir(parents=True, exist_ok=True)
+        print(f"[下载] source={source}, 月份={target_month}")
+        print(f"[下载] CPC 缓存目录：{raw_dir}")
+        return download_godas_grib(year, month, raw_dir)
+
+    if source == "psl":
+        Path(raw_dir).mkdir(parents=True, exist_ok=True)
+        if var_name:
+            if var_name not in ALL_GODAS_VARS:
+                raise ValueError(f"变量名不支持：{var_name}，可选值：{ALL_GODAS_VARS}")
+            print(f"[下载] source={source}, 变量={var_name}, 月份={target_month}")
+            download_godas_data(year, month, var_name, raw_dir)
+            return os.path.join(raw_dir, f"{var_name}.{year}.nc")
+        print(f"[下载] source={source}, 月份={target_month}")
+        download_all_variables(year, month, raw_dir)
+        return raw_dir
+
+    raise ValueError(f"不支持的 source: {source}")
 
 
-def run_preprocess_stage(target_month: str, raw_dir: str, processed_dir: str) -> str:
-    """执行全部变量预处理。"""
+def run_preprocess_stage(
+    target_month: str,
+    raw_dir: str,
+    processed_dir: str,
+    source: str = "cpc",
+) -> str:
+    """执行预处理（按 source 选择 CPC 或 PSL）。"""
     year, month = parse_date(target_month)
-    print(f"[预处理] 月份={target_month}")
-    preprocess_all_variables(raw_dir, processed_dir, year, month)
-    return processed_dir
+    effective_raw_dir = CPC_CACHE_DIR if source == "cpc" else raw_dir
+    print(f"[预处理] source={source}, 月份={target_month}")
+    if source == "cpc":
+        grib_file = resolve_cpc_grib_path(year, month, effective_raw_dir)
+        if not os.path.exists(grib_file):
+            raise FileNotFoundError(f"CPC GRIB 文件不存在：{grib_file}")
+        preprocess_all_from_grib(grib_file, processed_dir)
+        return processed_dir
+
+    if source == "psl":
+        preprocess_all_variables(effective_raw_dir, processed_dir, year, month)
+        return processed_dir
+
+    raise ValueError(f"不支持的 source: {source}")
+
+
+def validate_source(source: str) -> str:
+    if source not in ("cpc", "psl"):
+        raise ValueError(f"不支持的 source: {source}，可选 cpc/psl")
+    return source
 
 
 def run_infer_stage(target_month: str, processed_dir: str, preds_output_path: str) -> str:
@@ -834,8 +973,9 @@ def run_convert_stage(target_month: str, preds_path: str, output_path: str) -> s
     )
 
 
-def run_full_pipeline(target_month: str) -> str:
+def run_full_pipeline(target_month: str, source: str = "cpc") -> str:
     """执行完整推理流程。"""
+    source = validate_source(source)
     year, month = parse_date(target_month)
 
     print("=" * 60)
@@ -843,6 +983,7 @@ def run_full_pipeline(target_month: str) -> str:
     print("=" * 60)
     print(f"\n[1/6] 解析输入日期：{target_month}")
     print(f"✓ 起始日期：{year} 年 {month} 月")
+    print(f"✓ 数据源：{source.upper()}")
 
     print("\n[2/6] 检查依赖与设备...")
     check_dependencies()
@@ -852,18 +993,29 @@ def run_full_pipeline(target_month: str) -> str:
     os.makedirs(TMP_BASE_DIR, exist_ok=True)
 
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_infer_") as tmp_dir:
-        raw_dir = os.path.join(tmp_dir, "raw")
+        raw_dir = CPC_CACHE_DIR if source == "cpc" else os.path.join(tmp_dir, "raw")
         processed_dir = os.path.join(tmp_dir, "processed")
         preds_path = os.path.join(tmp_dir, "preds.npy")
         output_file = os.environ.get(
             "ORCA_INFERENCE_OUTPUT_NC",
             os.path.join(tmp_dir, f"orca_dl_prediction_{year}_{month:02d}_24months.nc"),
         )
+        if source == "cpc":
+            Path(raw_dir).mkdir(parents=True, exist_ok=True)
 
-        download_all_variables(year, month, raw_dir)
+        run_download_stage(
+            target_month=target_month,
+            raw_dir=raw_dir,
+            source=source,
+        )
 
         print(f"\n[4/6] 预处理数据（CDO 插值）...")
-        preprocess_all_variables(raw_dir, processed_dir, year, month)
+        run_preprocess_stage(
+            target_month=target_month,
+            raw_dir=raw_dir,
+            processed_dir=processed_dir,
+            source=source,
+        )
 
         print("\n[5/6] 执行模型推理...")
         run_model_inference(
@@ -888,10 +1040,15 @@ def run_full_pipeline(target_month: str) -> str:
     print("包含变量：so, thetao, tos, uo, vo, zos")
     return output_file
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ORCA-DL 海洋状态预测")
     parser.add_argument("target_month", nargs="?", help="目标月份，格式 YYYY-MM（如 2026-02）")
+    parser.add_argument(
+        "--source",
+        choices=["cpc", "psl"],
+        default="cpc",
+        help="数据源：cpc（默认）或 psl",
+    )
     parser.add_argument(
         "--stage",
         choices=["full", "check", "download", "preprocess", "infer", "convert"],
@@ -914,6 +1071,7 @@ def require_arg(value: str | None, arg_name: str, stage: str) -> str:
 
 def main() -> None:
     args = parse_args()
+    source = validate_source(args.source)
 
     if args.stage == "check":
         run_check_stage()
@@ -924,20 +1082,29 @@ def main() -> None:
         raise ValueError("缺少 target_month，格式应为 YYYY-MM（如 2026-02）")
 
     if args.stage == "full":
-        run_full_pipeline(target_month=target_month)
+        run_full_pipeline(target_month=target_month, source=source)
         return
 
     if args.stage == "download":
         raw_dir = require_arg(args.raw_dir, "raw-dir", args.stage)
-        var_name = require_arg(args.var, "var", args.stage)
-        output = run_download_stage(target_month=target_month, raw_dir=raw_dir, var_name=var_name)
+        output = run_download_stage(
+            target_month=target_month,
+            raw_dir=raw_dir,
+            source=source,
+            var_name=args.var,
+        )
         print(f"下载完成：{output}")
         return
 
     if args.stage == "preprocess":
         raw_dir = require_arg(args.raw_dir, "raw-dir", args.stage)
         processed_dir = require_arg(args.processed_dir, "processed-dir", args.stage)
-        output = run_preprocess_stage(target_month=target_month, raw_dir=raw_dir, processed_dir=processed_dir)
+        output = run_preprocess_stage(
+            target_month=target_month,
+            raw_dir=raw_dir,
+            processed_dir=processed_dir,
+            source=source,
+        )
         print(f"预处理完成：{output}")
         return
 

@@ -19,9 +19,9 @@ CRON = "0 2 1 * *"
 INFERENCE_CMD = ["pixi", "run", "-e", "model", "inference"]
 REPORT_CMD = ["pixi", "run", "-e", "orchestrator", "report"]
 TMP_BASE_DIR = ROOT / "tmp"
+CPC_CACHE_DIR = TMP_BASE_DIR / "cpc_cache"
 S3_BUCKET = "fengwu-public"
 S3_PREFIX = "szcx_ocean_report"
-GODAS_DOWNLOAD_VARS = ["pottmp", "salt", "ucur", "vcur", "sshg", "uflx", "vflx"]
 TASK_RETRIES = 1
 TASK_RETRY_DELAY_SECONDS = 30
 
@@ -51,6 +51,12 @@ def resolve_target_month(target_month: str | None) -> str:
 
 def resolve_raw_dir(pipeline_tmp_dir: str) -> Path:
     return Path(pipeline_tmp_dir) / "raw"
+
+
+def resolve_download_dir(source: str, pipeline_tmp_dir: str) -> Path:
+    if source == "cpc":
+        return CPC_CACHE_DIR
+    return resolve_raw_dir(pipeline_tmp_dir)
 
 
 def resolve_processed_dir(pipeline_tmp_dir: str) -> Path:
@@ -105,58 +111,53 @@ def check_inference_dependencies_task(dry_run: bool = False) -> None:
         return
 
     run_command(
-        [*INFERENCE_CMD, "--stage", "check"],
+        [*INFERENCE_CMD, "--stage", "check", "--source", "cpc"],
         task_name="检查推理依赖",
     )
 
 
-@task(
-    name="下载GODAS变量",
-    task_run_name="下载-{var_name}",
-    retries=TASK_RETRIES,
-    retry_delay_seconds=TASK_RETRY_DELAY_SECONDS,
-)
-def download_variable_task(
+@task(name="下载海洋数据", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
+def download_data_task(
     target_month: str,
     pipeline_tmp_dir: str,
-    var_name: str,
+    source: str = "cpc",
     dry_run: bool = False,
 ) -> str:
     logger = get_run_logger()
-    year, _ = target_month.split("-")
-    raw_dir = resolve_raw_dir(pipeline_tmp_dir)
+    raw_dir = resolve_download_dir(source, pipeline_tmp_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    output_path = raw_dir / f"{var_name}.{year}.nc"
 
     if dry_run:
-        logger.warning("dry_run=True，跳过下载，变量=%s", var_name)
-        return str(output_path)
+        logger.warning("dry_run=True，跳过下载，source=%s", source)
+        return str(raw_dir)
 
     run_command(
         [
             *INFERENCE_CMD,
             target_month,
+            "--source",
+            source,
             "--stage",
             "download",
             "--raw-dir",
             str(raw_dir),
-            "--var",
-            var_name,
         ],
-        task_name=f"下载变量 {var_name}",
+        task_name=f"下载海洋数据（source={source}）",
     )
 
-    if not output_path.is_file():
-        raise FileNotFoundError(f"下载文件缺失: {output_path}")
-
-    logger.info("变量下载完成: %s", output_path)
-    return str(output_path)
+    logger.info("数据下载完成，目录: %s", raw_dir)
+    return str(raw_dir)
 
 
 @task(name="预处理海洋数据", retries=TASK_RETRIES, retry_delay_seconds=TASK_RETRY_DELAY_SECONDS)
-def preprocess_data_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool = False) -> str:
+def preprocess_data_task(
+    target_month: str,
+    pipeline_tmp_dir: str,
+    source: str = "cpc",
+    dry_run: bool = False,
+) -> str:
     logger = get_run_logger()
-    raw_dir = resolve_raw_dir(pipeline_tmp_dir)
+    raw_dir = resolve_download_dir(source, pipeline_tmp_dir)
     processed_dir = resolve_processed_dir(pipeline_tmp_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,6 +169,8 @@ def preprocess_data_task(target_month: str, pipeline_tmp_dir: str, dry_run: bool
         [
             *INFERENCE_CMD,
             target_month,
+            "--source",
+            source,
             "--stage",
             "preprocess",
             "--raw-dir",
@@ -264,28 +267,36 @@ def run_report_task(prediction_path: str, target_month: str, dry_run: bool = Fal
 
 
 @flow(name=NAME, log_prints=True)
-def monthly_inference_flow(target_month: str | None = None, dry_run: bool = False) -> str:
+def monthly_inference_flow(
+    target_month: str | None = None,
+    source: str = "cpc",
+    dry_run: bool = False,
+) -> str:
     logger = get_run_logger()
     resolved_month = resolve_target_month(target_month=target_month)
+    resolved_source = source.lower().strip()
+    if resolved_source not in {"cpc", "psl"}:
+        raise ValueError(f"source 仅支持 cpc/psl，当前: {source}")
 
     logger.info("流程入参 target_month=%s", target_month)
+    logger.info("流程入参 source=%s", source)
     logger.info("流程最终执行月份=%s", resolved_month)
+    logger.info("流程最终数据源=%s", resolved_source)
 
     TMP_BASE_DIR.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="pipeline_") as pipeline_tmp_dir:
         check_inference_dependencies_task(dry_run=dry_run)
-
-        for var_name in GODAS_DOWNLOAD_VARS:
-            download_variable_task(
-                target_month=resolved_month,
-                pipeline_tmp_dir=pipeline_tmp_dir,
-                var_name=var_name,
-                dry_run=dry_run,
-            )
+        download_data_task(
+            target_month=resolved_month,
+            pipeline_tmp_dir=pipeline_tmp_dir,
+            source=resolved_source,
+            dry_run=dry_run,
+        )
 
         preprocess_data_task(
             target_month=resolved_month,
             pipeline_tmp_dir=pipeline_tmp_dir,
+            source=resolved_source,
             dry_run=dry_run,
         )
 
@@ -315,7 +326,7 @@ def serve_deployment() -> None:
     monthly_inference_flow.serve(
         name=NAME,
         schedule=CronSchedule(cron=CRON, timezone=TIMEZONE),
-        parameters={"dry_run": False},
+        parameters={"source": "cpc", "dry_run": False},
         tags=["orca", "inference", "monthly"],
         pause_on_shutdown=False,
     )

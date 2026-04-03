@@ -34,8 +34,10 @@ pixi run -e orchestrator pipeline-serve
 - cron: `0 2 1 * *`
 - timezone: `Asia/Shanghai`
 - 自动执行上个月数据
+- 默认数据源：`cpc`（可切换 `psl`）
 - `model` 环境仅执行推理；报告分析与 PDF 生成在 `orchestrator` 环境执行
-- Prefect 中可见推理阶段：依赖检查、变量下载（按变量）、预处理、模型推理、结果转换、报告生成
+- Prefect 中可见推理阶段：依赖检查、数据下载、预处理、模型推理、结果转换、报告生成
+- `cpc` 下载缓存固定目录：`./tmp/cpc_cache`（容器内 `/app/tmp/cpc_cache`）
 - 推理临时文件统一在 `./tmp` 下通过 `TemporaryDirectory` 管理并自动清理
 - 最终产物上传到：`s3://fengwu-public/szcx_ocean_report/YYYY-MM.pdf`
 - 本地 `output` 不保留当前流程生成的 PDF 文件
@@ -62,7 +64,14 @@ pixi run -e orchestrator pipeline-trigger -- --param dry_run=false
 pixi run -e orchestrator pipeline-trigger -- --param target_month=2026-02 --param dry_run=false
 ```
 
+指定数据源（例如 PSL）：
+
+```bash
+pixi run -e orchestrator pipeline-trigger -- --param source=psl --param target_month=2026-02 --param dry_run=false
+```
+
 注意：`target_month` 必须是 `YYYY-MM`（如 `2026-02`）。
+注意：`source` 仅支持 `cpc` / `psl`，默认 `cpc`。
 注意：`pipeline-trigger` 不再自动读取 `.env`，请确保当前运行环境已提供 `PREFECT_API_URL` 与 `PREFECT_API_AUTH_STRING`。
 
 ## 5. 自动部署（GitHub Actions）

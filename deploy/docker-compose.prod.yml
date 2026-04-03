@@ -9,5 +9,6 @@ services:
     command: ["pixi", "run", "-e", "orchestrator", "pipeline-serve"]
     volumes:
       - ./tmp:/app/tmp
+      - ./tmp/cpc_cache:/app/tmp/cpc_cache
       - ./ckpt:/app/ckpt:ro
       - ./stat:/app/stat:ro
