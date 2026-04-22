@@ -13,6 +13,8 @@ ORCA-DL GODAS 数据推理 CLI（仅推理流程）
     target_month: 初始化月份，格式 YYYY-MM（如 2025-12）
                   不传时默认上个月（Asia/Shanghai）
     --output-dir: NetCDF 输出目录，默认 ./output/models
+    --ckpt-list: MME 权重路径列表（默认 seed_1..seed_5，共 5 个）
+    --save-member-preds: 是否保存每个 seed 的 NetCDF 预测结果
     --source:   数据源（默认 cpc）
                 cpc: CPC 单月 GRIB 文件
                 psl: PSL 按变量分年 NetCDF 文件
@@ -20,6 +22,7 @@ ORCA-DL GODAS 数据推理 CLI（仅推理流程）
 输出：
     输出文件为 {output_dir}/{target_month}.nc
     预测时间从初始化月份的下个月开始（例如 2025-12 初始化 -> 2026-01 首报）
+    默认仅输出 MME 结果；可选保存各 seed 的成员 NetCDF 预测
     推理中间文件统一使用 TemporaryDirectory 管理并自动清理。
 
     包含以下变量（24 个月 × 6 个变量）：
@@ -33,7 +36,7 @@ ORCA-DL GODAS 数据推理 CLI（仅推理流程）
 依赖：
     - pixi 环境 'model': 包含 PyTorch 和相关 Python 包
     - pixi 环境 'exec': 包含 CDO 工具
-    - 模型文件: ./ckpt/seed_1.bin, ./model_config.json
+    - 模型文件: ./ckpt/seed_1.bin ... ./ckpt/seed_5.bin, ./model_config.json
     - 统计文件: ./stat/mean/*.npy, ./stat/std/*.npy
 
 注意事项：
@@ -50,7 +53,7 @@ import subprocess
 import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -65,7 +68,8 @@ from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_att
 # ============ 配置参数 ============
 # 模型配置
 MODEL_CONFIG_PATH = "./model_config.json"
-MODEL_CKPT_PATH = "./ckpt/seed_1.bin"
+DEFAULT_CKPT_PATHS = [f"./ckpt/seed_{i}.bin" for i in range(1, 6)]
+MME_MODEL_COUNT = 5
 STAT_DIR = "./stat"
 
 # 数据配置
@@ -165,6 +169,21 @@ def resolve_first_forecast_month(init_year: int, init_month: int) -> Tuple[int, 
     return shift_year_month(init_year, init_month, 1)
 
 
+def resolve_ckpt_paths(ckpt_list: List[str] | None = None) -> List[str]:
+    """解析并校验 MME 权重路径列表。"""
+    raw_list = DEFAULT_CKPT_PATHS if ckpt_list is None else ckpt_list
+    resolved: List[str] = []
+    for item in raw_list:
+        parts = [part.strip() for part in item.split(",") if part.strip()]
+        resolved.extend(parts)
+
+    if len(resolved) != MME_MODEL_COUNT:
+        raise ValueError(
+            f"MME 需要 {MME_MODEL_COUNT} 个模型权重，当前为 {len(resolved)} 个：{resolved}"
+        )
+    return resolved
+
+
 def resolve_target_month(target_month: str | None) -> str:
     if target_month:
         parse_date(target_month)
@@ -181,13 +200,14 @@ def resolve_target_month(target_month: str | None) -> str:
     return previous_month_last_day.strftime("%Y-%m")
 
 
-def check_dependencies():
+def check_dependencies(ckpt_paths: List[str]):
     """检查必要的文件和工具是否存在"""
     # 检查模型文件
     if not os.path.exists(MODEL_CONFIG_PATH):
         raise FileNotFoundError(f"模型配置文件不存在：{MODEL_CONFIG_PATH}")
-    if not os.path.exists(MODEL_CKPT_PATH):
-        raise FileNotFoundError(f"模型权重文件不存在：{MODEL_CKPT_PATH}")
+    for ckpt_path in ckpt_paths:
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"模型权重文件不存在：{ckpt_path}")
 
     # 检查网格文件
     if not os.path.exists(GRID_FILE):
@@ -791,7 +811,8 @@ def save_to_netcdf(
     predictions: Dict[str, np.ndarray],
     output_path: str,
     start_year: int,
-    start_month: int
+    start_month: int,
+    extra_global_attrs: Dict[str, object] | None = None,
 ):
     """
     保存预测结果为 NetCDF 文件
@@ -871,10 +892,13 @@ def save_to_netcdf(
             'forecast_start_date': f'{forecast_start_year}-{forecast_start_month:02d}',
             'forecast_end_date': f'{forecast_end_year}-{forecast_end_month:02d}',
             'forecast_months': PREDICT_STEPS,
-            'model_checkpoint': MODEL_CKPT_PATH,
+            'model_checkpoint': ",".join(DEFAULT_CKPT_PATHS),
             'conventions': 'CF-1.8'
         }
     )
+
+    if extra_global_attrs:
+        ds.attrs.update(extra_global_attrs)
 
     # 为坐标添加属性
     ds['lat'].attrs['long_name'] = 'Latitude'
@@ -949,8 +973,16 @@ def resolve_device() -> torch.device:
     return device
 
 
-def run_model_inference(processed_dir: str, month: int, preds_output_path: str) -> str:
-    """执行模型推理并保存原始预测张量为 NPY。"""
+def run_model_inference(
+    processed_dir: str,
+    year: int,
+    month: int,
+    preds_output_path: str,
+    ckpt_paths: List[str],
+    save_member_preds: bool = False,
+    member_preds_dir: str | None = None,
+) -> str:
+    """执行多模型推理并保存 MME 原始预测张量为 NPY。"""
     print("\n[推理] 准备模型输入（归一化）...")
     ocean_vars, atmo_vars = prepare_model_input(processed_dir, month)
     print(f"✓ 海洋变量形状：{ocean_vars.shape}")
@@ -958,36 +990,96 @@ def run_model_inference(processed_dir: str, month: int, preds_output_path: str) 
 
     print("\n[推理] 加载模型...")
     print(f"  模型配置：{MODEL_CONFIG_PATH}")
-    print(f"  模型权重：{MODEL_CKPT_PATH}")
+    print(f"  MME 模型数量：{len(ckpt_paths)}")
+    for idx, ckpt_path in enumerate(ckpt_paths, start=1):
+        print(f"    [{idx}] {ckpt_path}")
     device = resolve_device()
-    model = load_model(MODEL_CONFIG_PATH, MODEL_CKPT_PATH, device)
-    print("✓ 模型已加载")
 
-    print(f"\n[推理] 开始预测未来 {PREDICT_STEPS} 个月...")
-    with torch.no_grad():
-        output = model(
-            ocean_vars=ocean_vars.to(device),
-            atmo_vars=atmo_vars.to(device),
-            predict_time_steps=PREDICT_STEPS,
-        )
+    if save_member_preds:
+        base_member_dir = Path(member_preds_dir) if member_preds_dir else Path(preds_output_path).parent / "members"
+        base_member_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        base_member_dir = None
 
-    preds = output.preds.cpu().numpy()
+    mme_sum = None
+    print(f"\n[推理] 开始预测未来 {PREDICT_STEPS} 个月（MME）...")
+    for idx, ckpt_path in enumerate(ckpt_paths, start=1):
+        print(f"[推理] 模型 {idx}/{len(ckpt_paths)}：{ckpt_path}")
+        try:
+            model = load_model(MODEL_CONFIG_PATH, ckpt_path, device)
+        except Exception as e:
+            raise RuntimeError(f"模型加载失败：{ckpt_path}，错误：{e}") from e
+
+        try:
+            with torch.no_grad():
+                output = model(
+                    ocean_vars=ocean_vars.to(device),
+                    atmo_vars=atmo_vars.to(device),
+                    predict_time_steps=PREDICT_STEPS,
+                )
+            member_preds = output.preds.cpu().numpy()
+        except Exception as e:
+            raise RuntimeError(f"模型推理失败：{ckpt_path}，错误：{e}") from e
+
+        if mme_sum is None:
+            mme_sum = member_preds.astype(np.float64, copy=False)
+        else:
+            mme_sum += member_preds
+
+        if base_member_dir is not None:
+            member_name = f"{idx:02d}_{Path(ckpt_path).stem}"
+            member_output_path = base_member_dir / f"{member_name}.nc"
+            member_predictions = denormalize_predictions(member_preds, STAT_DIR, month)
+            member_global_attrs: Dict[str, object] = {
+                "ensemble_type": "single_seed",
+                "ensemble_members": 1,
+                "ensemble_member_index": idx,
+                "ensemble_member_ckpt": ckpt_path,
+                "model_checkpoint": ckpt_path,
+            }
+            save_to_netcdf(
+                predictions=member_predictions,
+                output_path=str(member_output_path),
+                start_year=year,
+                start_month=month,
+                extra_global_attrs=member_global_attrs,
+            )
+            print(f"  - 已保存成员 NetCDF：{member_output_path}")
+
+        del model
+
+    if mme_sum is None:
+        raise RuntimeError("MME 聚合失败：未获得任何模型预测结果")
+
+    preds = (mme_sum / len(ckpt_paths)).astype(np.float32, copy=False)
     preds_path = Path(preds_output_path)
     preds_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(preds_path, preds)
-    print(f"✓ 推理完成，输出形状：{preds.shape}")
+    print(f"✓ MME 推理完成，输出形状：{preds.shape}")
     print(f"✓ 中间结果已保存：{preds_path}")
     return str(preds_path)
 
 
-def convert_predictions_to_netcdf(preds_path: str, output_path: str, year: int, month: int) -> str:
+def convert_predictions_to_netcdf(
+    preds_path: str,
+    output_path: str,
+    year: int,
+    month: int,
+    extra_global_attrs: Dict[str, object] | None = None,
+) -> str:
     """将模型预测张量转换为最终 NetCDF 文件。"""
     print("\n[转换] 读取推理结果并反归一化...")
     preds = np.load(preds_path)
     predictions = denormalize_predictions(preds, STAT_DIR, month)
 
     print(f"[转换] 保存 NetCDF：{output_path}")
-    save_to_netcdf(predictions, output_path, year, month)
+    save_to_netcdf(
+        predictions,
+        output_path,
+        year,
+        month,
+        extra_global_attrs=extra_global_attrs,
+    )
     return output_path
 
 
@@ -1099,10 +1191,13 @@ def run_inference_only_pipeline(
     target_month: str | None = None,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     source: str = "cpc",
+    ckpt_list: List[str] | None = None,
+    save_member_preds: bool = False,
 ) -> str:
     """执行仅推理流程并将 NetCDF 落盘到 output_dir。"""
     resolved_month = resolve_target_month(target_month)
     resolved_source = validate_source(source)
+    resolved_ckpt_paths = resolve_ckpt_paths(ckpt_list)
     year, month = parse_date(resolved_month)
     forecast_start_year, forecast_start_month = resolve_first_forecast_month(year, month)
     forecast_end_year, forecast_end_month = shift_year_month(year, month, PREDICT_STEPS)
@@ -1116,14 +1211,22 @@ def run_inference_only_pipeline(
     print(f"✓ 首报日期：{forecast_start_year} 年 {forecast_start_month} 月")
     print(f"✓ 数据源：{resolved_source.upper()}")
     print(f"✓ 输出目录：{output_path.parent}")
+    print(f"✓ MME 模型数：{len(resolved_ckpt_paths)}")
 
     print("\n[2/4] 检查依赖与设备...")
-    check_dependencies()
+    check_dependencies(resolved_ckpt_paths)
     resolve_device()
 
     print(f"\n[3/4] 下载 GODAS 数据（{year}-{month:02d}）并执行预处理...")
     os.makedirs(TMP_BASE_DIR, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    member_preds_dir = output_path.parent / "members" / resolved_month
+    ensemble_global_attrs: Dict[str, object] = {
+        "ensemble_type": "mme_mean",
+        "ensemble_members": len(resolved_ckpt_paths),
+        "ensemble_ckpts": ",".join(Path(path).name for path in resolved_ckpt_paths),
+        "model_checkpoint": ",".join(resolved_ckpt_paths),
+    }
 
     with TemporaryDirectory(dir=TMP_BASE_DIR, prefix="orca_infer_") as tmp_dir:
         raw_dir = CPC_CACHE_DIR if resolved_source == "cpc" else os.path.join(tmp_dir, "raw")
@@ -1139,20 +1242,27 @@ def run_inference_only_pipeline(
         print("\n[4/4] 执行模型推理与结果转换...")
         run_model_inference(
             processed_dir=processed_dir,
+            year=year,
             month=month,
             preds_output_path=preds_path,
+            ckpt_paths=resolved_ckpt_paths,
+            save_member_preds=save_member_preds,
+            member_preds_dir=str(member_preds_dir),
         )
         convert_predictions_to_netcdf(
             preds_path=preds_path,
             output_path=str(output_path),
             year=year,
             month=month,
+            extra_global_attrs=ensemble_global_attrs,
         )
 
     print("\n" + "=" * 60)
     print("推理完成！")
     print("=" * 60)
     print(f"\n输出文件：{output_path}")
+    if save_member_preds:
+        print(f"成员 NetCDF 目录：{member_preds_dir}")
     print(f"预测时间范围：{forecast_start_year}-{forecast_start_month:02d} 至 {forecast_end_year}-{forecast_end_month:02d}")
     print("包含变量：so, thetao, tos, uo, vo, zos")
     return str(output_path)
@@ -1176,6 +1286,20 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_DIR,
         help=f"输出目录（默认 {DEFAULT_OUTPUT_DIR}）",
     )
+    parser.add_argument(
+        "--ckpt-list",
+        nargs="+",
+        default=None,
+        help=(
+            f"用于 MME 的 {MME_MODEL_COUNT} 个模型权重路径（空格分隔）。"
+            "默认使用 ./ckpt/seed_1.bin ... ./ckpt/seed_5.bin"
+        ),
+    )
+    parser.add_argument(
+        "--save-member-preds",
+        action="store_true",
+        help="保存每个 seed 的预测 NetCDF 到 {output_dir}/members/{target_month}",
+    )
     return parser.parse_args()
 
 
@@ -1185,6 +1309,8 @@ def main() -> None:
         target_month=args.target_month,
         output_dir=args.output_dir,
         source=args.source,
+        ckpt_list=args.ckpt_list,
+        save_member_preds=args.save_member_preds,
     )
 
 
