@@ -35,6 +35,9 @@ tenacity = ">=9.0,<10"
 [feature.model.tasks.inference]
 cmd = "python predict/inference.py"
 
+[feature.model.tasks.preprocess]
+cmd = "python predict/run_preprocess.py"
+
 [feature.exec.dependencies]
 cdo = ">=2.5.0,<3"
 

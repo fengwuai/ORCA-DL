@@ -10,7 +10,7 @@ ORCA-DL GODAS 数据推理 CLI（仅推理流程）
     pixi run -e model inference 2026-02 --source psl --output-dir ./output/models
 
 参数：
-    target_month: 目标月份，格式 YYYY-MM（如 2026-02）
+    target_month: 初始化月份，格式 YYYY-MM（如 2025-12）
                   不传时默认上个月（Asia/Shanghai）
     --output-dir: NetCDF 输出目录，默认 ./output/models
     --source:   数据源（默认 cpc）
@@ -19,6 +19,7 @@ ORCA-DL GODAS 数据推理 CLI（仅推理流程）
 
 输出：
     输出文件为 {output_dir}/{target_month}.nc
+    预测时间从初始化月份的下个月开始（例如 2025-12 初始化 -> 2026-01 首报）
     推理中间文件统一使用 TemporaryDirectory 管理并自动清理。
 
     包含以下变量（24 个月 × 6 个变量）：
@@ -83,6 +84,8 @@ GRIB_CODES = {
     "uflx": 124,
     "vflx": 125,
 }
+CPC_SST_PROXY_CODE = 13
+CPC_SST_PROXY_LEVEL = 5
 
 # 推理配置
 PREDICT_STEPS = 24   # 预测月数
@@ -90,12 +93,13 @@ INPUT_STEPS = 1     # 输入时间步数
 BATCH_SIZE = 1      # 推理批次大小
 
 # 变量配置（GODAS 命名）
-GODAS_VARS_3D = ['pottmp', 'salt', 'ucur', 'vcur']  # 3D 变量（16层）
-GODAS_VARS_2D = ['sshg']                            # 2D 变量（1层）
-GODAS_VARS_ATMO = ['uflx', 'vflx']                  # 大气强迫变量
-ALL_GODAS_VARS = GODAS_VARS_3D + GODAS_VARS_2D + GODAS_VARS_ATMO
-
-# 注意：sst 不需要下载，会从 pottmp 的第一层提取
+# 顺序需与 demo.ipynb 严格一致：salt, pottmp, sst, ucur, vcur, sshg
+GODAS_OCEAN_VARS_ORDER = ['salt', 'pottmp', 'sst', 'ucur', 'vcur', 'sshg']
+GODAS_VARS_3D = ['salt', 'pottmp', 'ucur', 'vcur']  # 3D 变量（16 层）
+GODAS_VARS_2D = ['sst', 'sshg']                      # 2D 变量（1 层）
+GODAS_VARS_2D_FROM_GRIB = ['sshg']                   # CPC GRIB 中可直接提取的 2D 变量
+GODAS_VARS_ATMO = ['uflx', 'vflx']                   # 大气强迫变量
+ALL_GODAS_VARS = GODAS_OCEAN_VARS_ORDER + GODAS_VARS_ATMO
 
 # 模型变量映射（GODAS -> 模型）
 VAR_MAPPING = {
@@ -146,6 +150,19 @@ def parse_date(date_str: str) -> Tuple[int, int]:
     if dt.strftime("%Y-%m") != date_str:
         raise ValueError(f"日期格式错误：{date_str}，应为 YYYY-MM 格式（如 2025-12）")
     return dt.year, dt.month
+
+
+def shift_year_month(year: int, month: int, month_offset: int) -> Tuple[int, int]:
+    """在指定年月基础上平移 month_offset 个月。"""
+    total = year * 12 + (month - 1) + month_offset
+    shifted_year = total // 12
+    shifted_month = (total % 12) + 1
+    return shifted_year, shifted_month
+
+
+def resolve_first_forecast_month(init_year: int, init_month: int) -> Tuple[int, int]:
+    """根据初始化年月计算首报年月（初始化月后 1 个月）。"""
+    return shift_year_month(init_year, init_month, 1)
 
 
 def resolve_target_month(target_month: str | None) -> str:
@@ -460,6 +477,20 @@ def preprocess_2d_from_grib(grib_file: str, output_nc: str, var_name: str):
     run_cdo_command(cmd, f"GRIB 2D 变量插值：{var_name}")
 
 
+def preprocess_sst_proxy_from_grib(grib_file: str, output_nc: str):
+    """从 GRIB 的温度场提取 5m 层作为 SST 代理，并完成水平插值。"""
+    cmd = [
+        "cdo", "-f", "nc4", "-b", "f64",
+        "setname,sst",
+        "-remapbil," + GRID_FILE,
+        f"-sellevel,{CPC_SST_PROXY_LEVEL}",
+        f"-selcode,{CPC_SST_PROXY_CODE}",
+        grib_file,
+        output_nc,
+    ]
+    run_cdo_command(cmd, f"GRIB SST 代理提取（code={CPC_SST_PROXY_CODE}, level={CPC_SST_PROXY_LEVEL}m）")
+
+
 def preprocess_all_from_grib(grib_file: str, processed_dir: str):
     """从单个 GRIB 文件预处理所有变量。"""
     os.makedirs(processed_dir, exist_ok=True)
@@ -469,10 +500,70 @@ def preprocess_all_from_grib(grib_file: str, processed_dir: str):
         print(f"  - 处理 3D 变量：{var}")
         preprocess_3d_from_grib(grib_file, output_file, var)
 
-    for var in GODAS_VARS_2D + GODAS_VARS_ATMO:
+    sst_output_file = os.path.join(processed_dir, "sst.nc")
+    print("  - 处理 2D 变量：sst（5m 代理）")
+    preprocess_sst_proxy_from_grib(grib_file, sst_output_file)
+
+    for var in GODAS_VARS_2D_FROM_GRIB + GODAS_VARS_ATMO:
         output_file = os.path.join(processed_dir, f"{var}.nc")
         print(f"  - 处理 2D 变量：{var}")
         preprocess_2d_from_grib(grib_file, output_file, var)
+
+
+def align_preprocessed_units_to_example(processed_dir: str) -> None:
+    """将预处理结果的单位体系统一到与 example/stat 一致。"""
+    target_units = {
+        "salt": "g/kg",
+        "pottmp": "degC",
+        "sst": "degC",
+    }
+
+    for var, unit in target_units.items():
+        nc_file = Path(processed_dir) / f"{var}.nc"
+        if not nc_file.is_file():
+            continue
+
+        with xr.open_dataset(nc_file) as ds:
+            ds_aligned = ds.load()
+
+        da = ds_aligned[var]
+        changed = []
+
+        # example 中 sst 为 2D（time, lat, lon）；若 depth 仅 1 层则压缩
+        if var == "sst" and "depth" in da.dims and da.sizes.get("depth") == 1:
+            ds_aligned = ds_aligned.squeeze("depth", drop=True)
+            da = ds_aligned[var]
+            changed.append("squeeze_depth")
+
+        data = da.values
+        finite = np.isfinite(data)
+        if finite.any():
+            median_abs = float(np.nanmedian(np.abs(data[finite])))
+            median_val = float(np.nanmedian(data[finite]))
+
+            # 温度：K -> degC
+            if var in ("pottmp", "sst") and median_val > 100:
+                data = data - 273.15
+                ds_aligned[var].data = data
+                changed.append("K_to_degC")
+
+            # 盐度：kg/kg -> g/kg
+            if var == "salt" and median_abs < 1:
+                data = data * 1000.0
+                ds_aligned[var].data = data
+                changed.append("kgkg_to_gkg")
+
+        ds_aligned[var].attrs["units"] = unit
+
+        tmp_file = nc_file.with_suffix(".nc.tmp")
+        ds_aligned.to_netcdf(tmp_file, format="NETCDF4", engine="netcdf4")
+        ds_aligned.close()
+        os.replace(tmp_file, nc_file)
+
+        if changed:
+            print(f"[单位对齐] {var}: {', '.join(changed)} -> {unit}")
+        else:
+            print(f"[单位对齐] {var}: already aligned -> {unit}")
 
 
 # ============ 数据归一化 ============
@@ -582,71 +673,50 @@ def prepare_model_input(processed_dir: str, month: int) -> Tuple[torch.Tensor, t
     ocean_channels = []
     atmo_channels = []
 
-    # 读取并归一化 3D 海洋变量（每个 16 层）
-    pottmp_data = None  # 保存 pottmp 数据用于提取 SST
-
-    for var in GODAS_VARS_3D:
+    # 海洋变量顺序严格对齐 demo.ipynb：salt, pottmp, sst, ucur, vcur, sshg
+    for var in GODAS_OCEAN_VARS_ORDER:
         nc_file = os.path.join(processed_dir, f"{var}.nc")
-        ds = xr.open_dataset(nc_file)
+        with xr.open_dataset(nc_file) as ds:
+            data = ds[var].values
 
-        # 获取数据并去掉时间维度
-        # CDO 输出格式: (1, 16, 128, 360) -> 需要取 [0] 得到 (16, 128, 360)
-        data = ds[var].values
-        if data.ndim == 4:  # (time, level, lat, lon)
-            data = data[0]  # 取第一个时间步，得到 (16, 128, 360)
+        if var in GODAS_VARS_3D:
+            # 目标格式：(16, 128, 360)
+            if data.ndim == 4:  # (time, level, lat, lon)
+                data = data[0]
+            if data.ndim != 3:
+                raise ValueError(f"{var} 维度不符合预期，期望 3D，实际 shape={data.shape}")
 
-        # 保存 pottmp 数据用于后续提取 SST
-        if var == 'pottmp':
-            pottmp_data = data.copy()
+            mean, std = load_statistics(STAT_DIR, var)
+            normalized = normalize_data(data, mean, std, month)
+            ocean_channels.extend(normalized[level] for level in range(16))
+            continue
 
-        # 加载统计量并归一化
-        mean, std = load_statistics(STAT_DIR, var)
-        normalized = normalize_data(data, mean, std, month)
-
-        # 添加到通道列表（16 个通道）
-        for level in range(16):
-            ocean_channels.append(normalized[level])
-
-        ds.close()
-
-    # 从 pottmp 第一层提取 SST 并归一化
-    if pottmp_data is not None:
-        sst_data = pottmp_data[0, :, :]  # 提取第一层 (128, 360)
-        mean, std = load_statistics(STAT_DIR, 'sst')
-        sst_normalized = normalize_data(sst_data, mean, std, month)
-        ocean_channels.append(sst_normalized)
-
-    # 读取并归一化 2D 海洋变量（sshg）
-    for var in GODAS_VARS_2D:
-        nc_file = os.path.join(processed_dir, f"{var}.nc")
-        ds = xr.open_dataset(nc_file)
-
-        # 获取数据并去掉时间维度
-        data = ds[var].values
-        if data.ndim == 3:  # (time, lat, lon)
-            data = data[0]  # 取第一个时间步，得到 (128, 360)
+        # 2D 变量：sst / sshg
+        if data.ndim == 4:      # (time, depth=1, lat, lon)
+            data = data[0, 0]
+        elif data.ndim == 3:    # (time, lat, lon)
+            data = data[0]
+        elif data.ndim != 2:    # (lat, lon)
+            raise ValueError(f"{var} 维度不符合预期，期望 2D，实际 shape={data.shape}")
 
         mean, std = load_statistics(STAT_DIR, var)
         normalized = normalize_data(data, mean, std, month)
-
         ocean_channels.append(normalized)
-        ds.close()
 
     # 读取并归一化大气强迫变量
     for var in GODAS_VARS_ATMO:
         nc_file = os.path.join(processed_dir, f"{var}.nc")
-        ds = xr.open_dataset(nc_file)
-
-        # 获取数据并去掉时间维度
-        data = ds[var].values
-        if data.ndim == 3:  # (time, lat, lon)
-            data = data[0]  # 取第一个时间步，得到 (128, 360)
+        with xr.open_dataset(nc_file) as ds:
+            data = ds[var].values
+        if data.ndim == 3:      # (time, lat, lon)
+            data = data[0]
+        elif data.ndim != 2:
+            raise ValueError(f"{var} 维度不符合预期，期望 2D，实际 shape={data.shape}")
 
         mean, std = load_statistics(STAT_DIR, var)
         normalized = normalize_data(data, mean, std, month)
 
         atmo_channels.append(normalized)
-        ds.close()
 
     # 拼接为张量
     ocean_vars = np.stack(ocean_channels, axis=0)  # (66, 128, 360)
@@ -672,13 +742,13 @@ def denormalize_predictions(
     Args:
         preds: 模型预测输出，shape: (1, 24, 66, 128, 360)
         stat_dir: 统计文件目录
-        start_month: 起始月份（1-12）
+        start_month: 初始化月份（1-12）
 
     Returns:
         变量名到反归一化数据的映射
         - so: (24, 16, 128, 360)
         - thetao: (24, 16, 128, 360)
-        - tos: (24, 1, 128, 360)  # 临时保留深度维度，后续会提取
+        - tos: (24, 1, 128, 360)
         - uo: (24, 16, 128, 360)
         - vo: (24, 16, 128, 360)
         - zos: (24, 1, 128, 360)
@@ -690,9 +760,9 @@ def denormalize_predictions(
     split_indices = [16, 32, 33, 49, 65]
     split_preds = np.split(preds, split_indices, axis=1)
 
-    # 变量顺序：so, thetao, tos, uo, vo, zos
-    var_names = ['salt', 'pottmp', 'sst', 'ucur', 'vcur', 'sshg']
-    model_var_names = ['so', 'thetao', 'tos', 'uo', 'vo', 'zos']
+    # 变量顺序与 demo 输入顺序一致
+    var_names = GODAS_OCEAN_VARS_ORDER
+    model_var_names = [VAR_MAPPING[v] for v in var_names]
 
     results = {}
 
@@ -703,8 +773,8 @@ def denormalize_predictions(
         # 对每个时间步进行反归一化
         denormed_steps = []
         for step in range(PREDICT_STEPS):
-            # 计算预测月份（循环 12 个月）
-            pred_month = ((start_month - 1 + step) % 12)  # 0-11
+            # 计算预测月份（首报为初始化月 + 1，循环 12 个月）
+            pred_month = ((start_month + step) % 12)  # 0-11
 
             # 反归一化：pred * std + mean
             denormed = pred[step] * std[pred_month] + mean[pred_month]
@@ -715,20 +785,6 @@ def denormalize_predictions(
         results[model_var] = np.stack(denormed_steps, axis=0)
 
     return results
-
-
-def extract_sst_from_pottmp(pottmp_data: np.ndarray) -> np.ndarray:
-    """
-    从位温数据中提取海表温度（第 1 层）
-
-    Args:
-        pottmp_data: 位温数据，shape: (24, 16, 128, 360)
-
-    Returns:
-        海表温度数据，shape: (24, 128, 360)
-    """
-    # 提取第 1 层（索引 0）
-    return pottmp_data[:, 0, :, :]
 
 
 def save_to_netcdf(
@@ -743,12 +799,15 @@ def save_to_netcdf(
     Args:
         predictions: 变量名到数据的映射
         output_path: 输出文件路径
-        start_year: 起始年份
-        start_month: 起始月份
+        start_year: 初始化年份
+        start_month: 初始化月份
     """
+    forecast_start_year, forecast_start_month = resolve_first_forecast_month(start_year, start_month)
+    forecast_end_year, forecast_end_month = shift_year_month(start_year, start_month, PREDICT_STEPS)
+
     # 创建时间坐标（24 个月）
     time_coord = pd.date_range(
-        start=f"{start_year}-{start_month:02d}",
+        start=f"{forecast_start_year}-{forecast_start_month:02d}",
         periods=PREDICT_STEPS,
         freq='MS'  # Month Start
     )
@@ -776,7 +835,7 @@ def save_to_netcdf(
     # 2D 变量（无深度维度）
     data_vars['tos'] = (
         ['time', 'lat', 'lon'],
-        predictions['tos'],
+        predictions['tos'][:, 0, :, :],  # 移除深度维度
         {
             'long_name': get_var_long_name('tos'),
             'units': get_var_units('tos'),
@@ -809,6 +868,8 @@ def save_to_netcdf(
             'source': 'ORCA-DL deep learning model trained on GODAS data',
             'history': f'Created on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
             'initialization_date': f'{start_year}-{start_month:02d}',
+            'forecast_start_date': f'{forecast_start_year}-{forecast_start_month:02d}',
+            'forecast_end_date': f'{forecast_end_year}-{forecast_end_month:02d}',
             'forecast_months': PREDICT_STEPS,
             'model_checkpoint': MODEL_CKPT_PATH,
             'conventions': 'CF-1.8'
@@ -871,7 +932,7 @@ def get_var_description(var: str) -> str:
     descriptions = {
         'so': 'Salinity of sea water at 16 depth levels',
         'thetao': 'Potential temperature of sea water at 16 depth levels',
-        'tos': 'Temperature of sea water at the surface (extracted from first level of potential temperature)',
+        'tos': 'Temperature of sea water at the surface',
         'uo': 'Eastward component of ocean current velocity at 16 depth levels',
         'vo': 'Northward component of ocean current velocity at 16 depth levels',
         'zos': 'Sea surface height anomaly relative to geoid'
@@ -925,9 +986,6 @@ def convert_predictions_to_netcdf(preds_path: str, output_path: str, year: int, 
     preds = np.load(preds_path)
     predictions = denormalize_predictions(preds, STAT_DIR, month)
 
-    print("[转换] 提取海表温度...")
-    predictions["tos"] = extract_sst_from_pottmp(predictions["thetao"])
-
     print(f"[转换] 保存 NetCDF：{output_path}")
     save_to_netcdf(predictions, output_path, year, month)
     return output_path
@@ -938,7 +996,6 @@ def run_download_step(target_month: str, raw_dir: str, source: str = "cpc") -> s
     year, month = parse_date(target_month)
 
     if source == "cpc":
-        raw_dir = CPC_CACHE_DIR
         Path(raw_dir).mkdir(parents=True, exist_ok=True)
         print(f"[下载] source={source}, 月份={target_month}")
         print(f"[下载] CPC 缓存目录：{raw_dir}")
@@ -953,20 +1010,38 @@ def run_download_step(target_month: str, raw_dir: str, source: str = "cpc") -> s
     raise ValueError(f"不支持的 source: {source}")
 
 
+def validate_preprocessed_outputs(processed_dir: str) -> None:
+    """校验预处理产物是否齐全。"""
+    required_vars = GODAS_OCEAN_VARS_ORDER + GODAS_VARS_ATMO
+    missing = [
+        var for var in required_vars
+        if not os.path.isfile(os.path.join(processed_dir, f"{var}.nc"))
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "预处理结果缺失变量文件："
+            + ", ".join(f"{var}.nc" for var in missing)
+        )
+
+
 def run_preprocess_step(target_month: str, raw_dir: str, processed_dir: str, source: str = "cpc") -> str:
     """执行预处理（按 source 选择 CPC 或 PSL）。"""
     year, month = parse_date(target_month)
-    effective_raw_dir = CPC_CACHE_DIR if source == "cpc" else raw_dir
+    effective_raw_dir = raw_dir
     print(f"[预处理] source={source}, 月份={target_month}")
     if source == "cpc":
         grib_file = resolve_cpc_grib_path(year, month, effective_raw_dir)
         if not os.path.exists(grib_file):
             raise FileNotFoundError(f"CPC GRIB 文件不存在：{grib_file}")
         preprocess_all_from_grib(grib_file, processed_dir)
+        align_preprocessed_units_to_example(processed_dir)
+        validate_preprocessed_outputs(processed_dir)
         return processed_dir
 
     if source == "psl":
         preprocess_all_variables(effective_raw_dir, processed_dir, year, month)
+        align_preprocessed_units_to_example(processed_dir)
+        validate_preprocessed_outputs(processed_dir)
         return processed_dir
 
     raise ValueError(f"不支持的 source: {source}")
@@ -978,6 +1053,48 @@ def validate_source(source: str) -> str:
     return source
 
 
+def run_data_preprocess_pipeline(
+    target_month: str,
+    source: str = "cpc",
+    raw_dir: str | None = None,
+    processed_dir: str | None = None,
+) -> str:
+    """按日期执行下载与预处理，返回预处理目录绝对路径。"""
+    parse_date(target_month)
+    resolved_source = validate_source(source)
+
+    if raw_dir is None:
+        if resolved_source == "cpc":
+            raw_dir = CPC_CACHE_DIR
+        else:
+            raw_dir = os.path.join(TMP_BASE_DIR, "preprocess_raw", target_month)
+
+    if processed_dir is None:
+        processed_dir = os.path.join(
+            "./output/preprocessed",
+            target_month,
+            resolved_source,
+        )
+
+    raw_dir_path = Path(raw_dir).expanduser().resolve()
+    processed_dir_path = Path(processed_dir).expanduser().resolve()
+    raw_dir_path.mkdir(parents=True, exist_ok=True)
+    processed_dir_path.mkdir(parents=True, exist_ok=True)
+
+    run_download_step(
+        target_month=target_month,
+        raw_dir=str(raw_dir_path),
+        source=resolved_source,
+    )
+    run_preprocess_step(
+        target_month=target_month,
+        raw_dir=str(raw_dir_path),
+        processed_dir=str(processed_dir_path),
+        source=resolved_source,
+    )
+    return str(processed_dir_path)
+
+
 def run_inference_only_pipeline(
     target_month: str | None = None,
     output_dir: str = DEFAULT_OUTPUT_DIR,
@@ -987,21 +1104,24 @@ def run_inference_only_pipeline(
     resolved_month = resolve_target_month(target_month)
     resolved_source = validate_source(source)
     year, month = parse_date(resolved_month)
+    forecast_start_year, forecast_start_month = resolve_first_forecast_month(year, month)
+    forecast_end_year, forecast_end_month = shift_year_month(year, month, PREDICT_STEPS)
     output_path = Path(output_dir).expanduser().resolve() / f"{resolved_month}.nc"
 
     print("=" * 60)
     print("ORCA-DL 海洋状态预测系统（仅推理）")
     print("=" * 60)
-    print(f"\n[1/5] 解析输入日期：{resolved_month}")
-    print(f"✓ 起始日期：{year} 年 {month} 月")
+    print(f"\n[1/4] 解析输入日期：{resolved_month}")
+    print(f"✓ 初始化日期：{year} 年 {month} 月")
+    print(f"✓ 首报日期：{forecast_start_year} 年 {forecast_start_month} 月")
     print(f"✓ 数据源：{resolved_source.upper()}")
     print(f"✓ 输出目录：{output_path.parent}")
 
-    print("\n[2/5] 检查依赖与设备...")
+    print("\n[2/4] 检查依赖与设备...")
     check_dependencies()
     resolve_device()
 
-    print(f"\n[3/5] 下载 GODAS 数据（{year}-{month:02d}）...")
+    print(f"\n[3/4] 下载 GODAS 数据（{year}-{month:02d}）并执行预处理...")
     os.makedirs(TMP_BASE_DIR, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1009,24 +1129,14 @@ def run_inference_only_pipeline(
         raw_dir = CPC_CACHE_DIR if resolved_source == "cpc" else os.path.join(tmp_dir, "raw")
         processed_dir = os.path.join(tmp_dir, "processed")
         preds_path = os.path.join(tmp_dir, "preds.npy")
-        if resolved_source == "cpc":
-            Path(raw_dir).mkdir(parents=True, exist_ok=True)
-
-        run_download_step(
-            target_month=resolved_month,
-            raw_dir=raw_dir,
-            source=resolved_source,
-        )
-
-        print(f"\n[4/5] 预处理数据（CDO 插值）...")
-        run_preprocess_step(
+        processed_dir = run_data_preprocess_pipeline(
             target_month=resolved_month,
             raw_dir=raw_dir,
             processed_dir=processed_dir,
             source=resolved_source,
         )
 
-        print("\n[5/5] 执行模型推理与结果转换...")
+        print("\n[4/4] 执行模型推理与结果转换...")
         run_model_inference(
             processed_dir=processed_dir,
             month=month,
@@ -1043,7 +1153,7 @@ def run_inference_only_pipeline(
     print("推理完成！")
     print("=" * 60)
     print(f"\n输出文件：{output_path}")
-    print(f"预测时间范围：{year}-{month:02d} 至 {year + (month + PREDICT_STEPS - 1) // 12}-{((month + PREDICT_STEPS - 1) % 12) + 1:02d}")
+    print(f"预测时间范围：{forecast_start_year}-{forecast_start_month:02d} 至 {forecast_end_year}-{forecast_end_month:02d}")
     print("包含变量：so, thetao, tos, uo, vo, zos")
     return str(output_path)
 
@@ -1053,7 +1163,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "target_month",
         nargs="?",
-        help="目标月份，格式 YYYY-MM（如 2026-02）；默认上个月",
+        help="初始化月份，格式 YYYY-MM（如 2025-12）；默认上个月",
     )
     parser.add_argument(
         "--source",
