@@ -135,6 +135,7 @@ def run_monthly_pipeline(
     target_month: str | None = None,
     source: str = "cpc",
     output_dir: str = DEFAULT_REPORT_OUTPUT_DIR,
+    local_only: bool = False,
 ) -> str:
     logger = resolve_logger()
     resolved_month = resolve_target_month(target_month=target_month)
@@ -144,16 +145,19 @@ def run_monthly_pipeline(
     logger.info("流程入参 target_month=%s", target_month)
     logger.info("流程入参 source=%s", source)
     logger.info("流程入参 output_dir=%s", output_dir)
+    logger.info("流程入参 local_only=%s", local_only)
     logger.info("流程最终执行月份=%s", resolved_month)
     logger.info("流程最终数据源=%s", resolved_source)
     logger.info("流程最终报告目录=%s", resolved_output_dir)
+    logger.info("流程最终 local_only=%s", local_only)
 
     send_pipeline_notification(
         title="海洋模型月度流程开始",
         message=(
             f"任务已启动，月份：{resolved_month}；"
             f"数据源：{resolved_source}；"
-            f"报告输出目录：{resolved_output_dir}。"
+            f"报告输出目录：{resolved_output_dir}；"
+            f"本地模式：{local_only}。"
         ),
     )
 
@@ -183,16 +187,21 @@ def run_monthly_pipeline(
                 target_month=resolved_month,
                 input_netcdf_path=prediction_path,
                 output_dir=resolved_output_dir,
+                local_only=local_only,
             )
 
         logger.info("流程完成，报告路径=%s", report_uri)
+        success_message = (
+            f"任务执行完成，月份：{resolved_month}；"
+            f"数据源：{resolved_source}；"
+        )
+        if local_only:
+            success_message += f"本地报告路径：{report_uri}。"
+        else:
+            success_message += f"报告地址：{build_public_report_url(resolved_month)}。"
         send_pipeline_notification(
             title="海洋模型月度流程完成",
-            message=(
-                f"任务执行完成，月份：{resolved_month}；"
-                f"数据源：{resolved_source}；"
-                f"报告地址：{build_public_report_url(resolved_month)}。"
-            ),
+            message=success_message,
         )
         return report_uri
 
@@ -213,8 +222,14 @@ def monthly_inference_flow(
     target_month: str | None = None,
     source: str = "cpc",
     output_dir: str = DEFAULT_REPORT_OUTPUT_DIR,
+    local_only: bool = False,
 ) -> str:
-    return run_monthly_pipeline(target_month=target_month, source=source, output_dir=output_dir)
+    return run_monthly_pipeline(
+        target_month=target_month,
+        source=source,
+        output_dir=output_dir,
+        local_only=local_only,
+    )
 
 
 def serve_deployment() -> None:
@@ -248,6 +263,11 @@ def parse_args() -> argparse.Namespace:
         default="cpc",
         help="数据源：cpc（默认）或 psl",
     )
+    run_parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="仅生成本地 PDF，不上传到厦门",
+    )
 
     subparsers.add_parser("serve", help="启动 Prefect 部署服务")
 
@@ -267,8 +287,12 @@ def main() -> None:
         target_month=args.target_month,
         source=args.source,
         output_dir=args.output_dir,
+        local_only=args.local_only,
     )
-    print(f"报告上传完成: {report_uri}")
+    if args.local_only:
+        print(f"报告本地生成完成: {report_uri}")
+    else:
+        print(f"报告上传完成: {report_uri}")
 
 
 if __name__ == "__main__":

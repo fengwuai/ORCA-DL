@@ -217,21 +217,22 @@ def build_prompt(
 1. 严格保持模板的标题层级与顺序，不得新增或删除章节。
 2. 必须填充模板中的占位符，最终输出不得出现任何 {{{{...}}}}。
 3. 仅允许使用 <new_data_summary_json> 与 <new_data_summary_text> 可推断的信息，禁止臆造数值。
-4. 图片链接必须逐字使用以下路径：
+4. ENSO 相关论述必须以 `oni` 与 `oni_events` 字段为准（3 个月滑动 ONI 口径），不得使用“24 个月均值异常”口径。
+5. 图片链接必须逐字使用以下路径：
    - Nino 3.4 Time Series: {image_links['nino34']}
    - SST Map Start: {image_links['sst0']}
    - SST Map Mid: {image_links['sst12']}
    - SST Map End: {image_links['sst23']}
    - Mean Current Speed: {image_links['current']}
-5. 2.2 阶段划分必须是 4 列表格（时间段/状态/距平特征/依据），至少 2 条数据行。
-6. 4.1 航运风险与建议清单必须是编号列表，至少 3 条，每条必须包含以下字段：
+6. 2.2 阶段划分必须是 4 列表格（时间段/状态/距平特征/依据），至少 2 条数据行，时间段优先使用 ONI season 或 ONI event window。
+7. 4.1 航运风险与建议清单必须是编号列表，至少 3 条，每条必须包含以下字段：
    - 风险信号
    - 影响区域/航线
    - 时间窗
    - 运营影响
    - 建议动作
    - 置信度（仅可用 高/中/低）
-7. 输出必须是纯 markdown，不要输出解释文字或代码块围栏。
+8. 输出必须是纯 markdown，不要输出解释文字或代码块围栏。
 
 <template>
 {template_markdown}
@@ -617,6 +618,7 @@ def generate_pdf_report(
     target_month: str,
     input_netcdf_path: str | Path,
     output_dir: str | Path = DEFAULT_REPORT_OUTPUT_DIR,
+    local_only: bool = False,
 ) -> str:
     resolved_month = parse_target_month(target_month)
     load_root_env()
@@ -669,7 +671,9 @@ def generate_pdf_report(
             output_pdf=temp_pdf_path,
             work_dir=temp_dir,
         )
-        save_pdf_to_local_dir(temp_pdf_path, resolved_month, output_dir=resolved_output_dir)
+        local_pdf_path = save_pdf_to_local_dir(temp_pdf_path, resolved_month, output_dir=resolved_output_dir)
+        if local_only:
+            return str(local_pdf_path)
         return upload_pdf_to_xiamen(temp_pdf_path, resolved_month)
 
     raise RuntimeError("报告上传失败")

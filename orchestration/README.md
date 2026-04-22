@@ -31,17 +31,20 @@ cp .env.example .env
 ```bash
 pixi run -e orchestrator pipeline
 pixi run -e orchestrator pipeline 2026-02 --source psl --output-dir ./output/reports
+pixi run -e orchestrator pipeline 2026-02 --local-only --output-dir ./output/reports
 ```
 
 参数：
 - `target_month`（可选）：格式 `YYYY-MM`，默认上个月（`Asia/Shanghai`）
 - `--output-dir`：报告输出目录，默认 `./output/reports`
 - `--source`：初始数据源，`cpc`（默认）或 `psl`
+- `--local-only`：仅生成本地 PDF，不上传
 
 行为说明：
 - 推理中间目录、模型中间结果、临时 NetCDF 均由 `TemporaryDirectory` 统一管理并自动清理
-- 最终上传：`s3://szcx-ds-wthr-public/ocean_report/YYYY-MM.pdf`
+- 默认最终上传：`s3://szcx-ds-wthr-public/ocean_report/YYYY-MM.pdf`
 - 本地保留 PDF：`{output_dir}/YYYY-MM.pdf`
+- 若开启 `--local-only`，仅输出本地 PDF，不执行上传
 
 ### 3.2 仅推理流程
 
