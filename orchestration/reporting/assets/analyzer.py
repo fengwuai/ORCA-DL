@@ -300,38 +300,18 @@ def analyze(input_file: Path, output_dir: Path) -> None:
             anomaly_values = np.asarray([item.anomaly_c for item in monthly_anomalies], dtype=float)
 
             plt.figure(figsize=(10, 6))
-            if member_files:
-                for i, member_ssta in enumerate(member_ssta_list):
-                    plt.plot(
-                        nino34_sst["time"].values,
-                        member_ssta,
-                        color="gray",
-                        alpha=0.3,
-                        linewidth=1,
-                        label="Member" if i == 0 else None,
-                    )
-                plt.plot(
-                    nino34_sst["time"].values,
-                    ssta_values,
-                    color="black",
-                    linewidth=2.5,
-                    marker="s",
-                    label="MME",
-                )
-            else:
-                plt.plot(
-                    nino34_sst["time"].values,
-                    ssta_values,
-                    marker="o",
-                    label="Nino 3.4 SSTA",
-                )
-
+            plt.plot(
+                nino34_sst["time"].values,
+                ssta_values,
+                color="black",
+                linewidth=2,
+                marker="o",
+            )
             plt.axhline(y=0, color="k", linestyle="--", alpha=0.3)
             plt.title("Nino 3.4 SSTA Prediction")
             plt.xlabel("Date")
             plt.ylabel("SSTA (°C)")
             plt.grid(True)
-            plt.legend()
             plt.tight_layout()
             plt.savefig(output_dir / "nino34_timeseries.png")
             plt.close()
