@@ -217,14 +217,14 @@ def build_prompt(
 1. 严格保持模板的标题层级与顺序，不得新增或删除章节。
 2. 必须填充模板中的占位符，最终输出不得出现任何 {{{{...}}}}。
 3. 仅允许使用 <new_data_summary_json> 与 <new_data_summary_text> 可推断的信息，禁止臆造数值。
-4. ENSO 相关论述必须以 `oni` 与 `oni_events` 字段为准（3 个月滑动 ONI 口径），不得使用“24 个月均值异常”口径。
+4. ENSO 相关论述必须以 `oni` 与 `oni_events` 字段为准（3 个月滑动 ONI 口径），不得使用”24 个月均值异常”口径。
 5. 图片链接必须逐字使用以下路径：
    - Nino 3.4 Time Series: {image_links['nino34']}
    - SST Map Start: {image_links['sst0']}
    - SST Map Mid: {image_links['sst12']}
    - SST Map End: {image_links['sst23']}
    - Mean Current Speed: {image_links['current']}
-6. 2.2 阶段划分必须是 4 列表格（时间段/状态/距平特征/依据），至少 2 条数据行，时间段优先使用 ONI season 或 ONI event window。
+6. 2.2 阶段划分必须是 4 列表格（时间段/状态/距平特征/依据），至少 2 条数据行。时间段必须使用具体月份格式（如”2026年5月 - 2027年4月”），不得使用季节代码（如”2026-MJJ”）。可从 ONI season 或 ONI event 的 start_center_month 和 end_center_month 字段提取具体月份。
 7. 4.1 航运风险与建议清单必须是编号列表，至少 3 条，每条必须包含以下字段：
    - 风险信号
    - 影响区域/航线
