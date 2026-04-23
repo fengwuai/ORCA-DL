@@ -34,3 +34,6 @@ run_jupyter.sh
 .env
 .env.*
 !.env.example
+
+# climatology data (large files, not tracked in git)
+clim/*.nc

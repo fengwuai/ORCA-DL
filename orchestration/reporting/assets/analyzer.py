@@ -13,15 +13,6 @@ import xarray as xr
 
 
 @dataclass(frozen=True)
-class CPCBaselineRow:
-    year: int
-    month: int
-    total_c: float
-    clim_adjust_c: float
-    anom_c: float
-
-
-@dataclass(frozen=True)
 class MonthlyAnomaly:
     month: str
     sst_c: float
@@ -40,8 +31,6 @@ class ONISeason:
     phase: str
 
 
-CPC_SNAPSHOT_PATH = Path(__file__).resolve().parent / "cpc" / "detrend.nino34.ascii.txt"
-ROLLING_BASELINE_YEARS = 30
 SEASON_LABEL_BY_START_MONTH: dict[int, str] = {
     1: "JFM",
     2: "FMA",
@@ -74,100 +63,79 @@ def classify_oni_phase(oni_c: float) -> str:
     return "Neutral"
 
 
-def parse_cpc_snapshot(snapshot_path: Path) -> list[CPCBaselineRow]:
-    if not snapshot_path.is_file():
-        raise FileNotFoundError(f"CPC 基准快照不存在: {snapshot_path}")
+def load_climatology(clim_path: Path) -> xr.Dataset:
+    """加载气候态文件并校验维度"""
+    if not clim_path.is_file():
+        raise FileNotFoundError(f"气候态文件不存在: {clim_path}")
 
-    rows: list[CPCBaselineRow] = []
-    for raw_line in snapshot_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("YR"):
-            continue
-        parts = line.split()
-        if len(parts) != 5:
-            continue
-        year, month = int(parts[0]), int(parts[1])
-        total_c, clim_adjust_c, anom_c = float(parts[2]), float(parts[3]), float(parts[4])
-        rows.append(
-            CPCBaselineRow(
-                year=year,
-                month=month,
-                total_c=total_c,
-                clim_adjust_c=clim_adjust_c,
-                anom_c=anom_c,
-            )
-        )
+    clim_ds = xr.open_dataset(clim_path)
+    clim = clim_ds["clim"]
 
-    if not rows:
-        raise ValueError(f"CPC 基准快照为空: {snapshot_path}")
-    return rows
+    expected_shape = (24, 12, 128, 360)
+    if clim.shape != expected_shape:
+        raise ValueError(f"气候态维度错误: {clim.shape}, 期望 {expected_shape}")
+
+    return clim_ds
 
 
-def build_total_lookup(
-    rows: list[CPCBaselineRow],
-) -> tuple[dict[tuple[int, int], float], int, int, dict[int, int], dict[int, int]]:
-    total_lookup: dict[tuple[int, int], float] = {}
-    years: set[int] = set()
-    available_months: set[int] = set()
-    min_year_by_month: dict[int, int] = {}
-    max_year_by_month: dict[int, int] = {}
+def extract_initialization_month(ds: xr.Dataset) -> int:
+    """从 NetCDF 全局属性提取起报月份（1-12）"""
+    init_date = ds.attrs.get("initialization_date", "")
+    if not init_date:
+        raise ValueError("NetCDF 缺少 initialization_date 属性")
 
-    for row in rows:
-        total_lookup[(row.year, row.month)] = row.total_c
-        years.add(row.year)
-        available_months.add(row.month)
-        current_min = min_year_by_month.get(row.month)
-        current_max = max_year_by_month.get(row.month)
-        min_year_by_month[row.month] = row.year if current_min is None else min(current_min, row.year)
-        max_year_by_month[row.month] = row.year if current_max is None else max(current_max, row.year)
+    try:
+        year, month = init_date.split("-")
+        month = int(month)
+        if not 1 <= month <= 12:
+            raise ValueError(f"月份超出范围: {month}")
 
-    missing_months = [month for month in range(1, 13) if month not in available_months]
-    if missing_months:
-        raise ValueError(f"CPC 快照缺少月份: {missing_months}")
-    if not years:
-        raise ValueError("CPC 快照中没有可用年份")
-    return total_lookup, min(years), max(years), min_year_by_month, max_year_by_month
+        # 计算预测开始月份（初始化月份的下一个月）
+        forecast_start_month = (month % 12) + 1
+        return forecast_start_month
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"无法解析 initialization_date: {init_date}") from exc
 
 
-def resolve_rolling_30y_baseline_c(
-    year: int,
-    month: int,
-    total_lookup: dict[tuple[int, int], float],
-    month_min_year: int,
-    month_max_year: int,
-) -> tuple[float, str]:
-    target_end_year = year - 1
-    baseline_end_year = min(target_end_year, month_max_year)
-    baseline_start_year = baseline_end_year - (ROLLING_BASELINE_YEARS - 1)
+def compute_ssta_from_climatology(
+    sst: xr.DataArray,
+    clim_ds: xr.Dataset,
+    start_month: int
+) -> np.ndarray:
+    """使用气候态计算 Nino3.4 SSTA 时间序列"""
+    clim = clim_ds["clim"]
+    lat = sst.lat.values
+    lon = sst.lon.values
 
-    if baseline_start_year < month_min_year:
-        raise ValueError(
-            "CPC 快照覆盖不足，无法计算过去30年基准："
-            f"target={year}-{month:02d}, window={baseline_start_year}-{baseline_end_year}, "
-            f"month_range={month_min_year}-{month_max_year}"
-        )
+    lat_mask = (lat >= -5) & (lat <= 5)
+    lon_mask = (lon >= 190) & (lon <= 240)
 
-    baseline_values: list[float] = []
-    missing_years: list[int] = []
-    for baseline_year in range(baseline_start_year, baseline_end_year + 1):
-        value = total_lookup.get((baseline_year, month))
-        if value is None:
-            missing_years.append(baseline_year)
-            continue
-        baseline_values.append(value)
+    n_time = sst.shape[0]
+    ssta_series = np.zeros(n_time)
 
-    if missing_years:
-        raise ValueError(
-            "CPC 快照缺失过去30年窗口数据："
-            f"target={year}-{month:02d}, month={month:02d}, "
-            f"missing_years={missing_years[:6]}{'...' if len(missing_years) > 6 else ''}"
-        )
+    month_idx = start_month - 1
 
-    baseline_c = float(np.mean(baseline_values))
-    baseline_source = f"rolling_30y_total:{baseline_start_year}-{baseline_end_year}"
-    if target_end_year > month_max_year:
-        baseline_source += "(future_fixed_window)"
-    return baseline_c, baseline_source
+    for t in range(n_time):
+        sst_region = sst.values[t, lat_mask, :][:, lon_mask]
+        clim_region = clim.values[t, month_idx, lat_mask, :][:, lon_mask]
+
+        ssta = sst_region - clim_region
+        with np.errstate(all="ignore"):
+            ssta_series[t] = np.nanmean(ssta)
+
+    return ssta_series
+
+
+def discover_member_files(input_file: Path) -> list[Path] | None:
+    """自动发现多 seed 成员文件"""
+    target_month = input_file.stem
+    members_dir = input_file.parent / "members" / target_month
+
+    if not members_dir.is_dir():
+        return None
+
+    member_files = sorted(members_dir.glob("*.nc"))
+    return member_files if member_files else None
 
 
 def build_oni_seasons(monthly_anomalies: list[MonthlyAnomaly]) -> list[ONISeason]:
@@ -276,56 +244,89 @@ def analyze(input_file: Path, output_dir: Path) -> None:
             stats_file.write(text + "\n")
 
         log("Loading data...")
-        cpc_rows = parse_cpc_snapshot(CPC_SNAPSHOT_PATH)
-        (
-            total_lookup,
-            cpc_min_year,
-            cpc_max_year,
-            min_year_by_month,
-            max_year_by_month,
-        ) = build_total_lookup(cpc_rows)
+        CLIM_PATH = Path(__file__).resolve().parent.parent.parent.parent / "clim" / "orca_clim_198002_202201.nc"
+        clim_ds = load_climatology(CLIM_PATH)
 
         with xr.open_dataset(input_file) as ds:
             if int(ds.sizes.get("time", 0)) == 0:
                 raise ValueError("Dataset has no time dimension")
 
-            log("Analyzing ENSO with CPC baseline...")
+            start_month = extract_initialization_month(ds)
+            log(f"Initialization month: {start_month}")
+
+            member_files = discover_member_files(input_file)
+            if member_files:
+                log(f"Found {len(member_files)} ensemble members")
+
+            log("Analyzing ENSO with climatology baseline...")
             sst = ds["tos"]
             nino34_sst = sst.sel(lat=slice(-5, 5), lon=slice(190, 240)).mean(dim=["lat", "lon"])
             nino34_values = np.asarray(nino34_sst.values, dtype=float)
-            monthly_anomalies: list[MonthlyAnomaly] = []
-            future_fixed_window_count = 0
 
-            for timestamp, sst_value in zip(nino34_sst.time.values, nino34_values):
-                dt = pd.to_datetime(timestamp)
-                baseline_c, baseline_source = resolve_rolling_30y_baseline_c(
-                    year=int(dt.year),
-                    month=int(dt.month),
-                    total_lookup=total_lookup,
-                    month_min_year=min_year_by_month[int(dt.month)],
-                    month_max_year=max_year_by_month[int(dt.month)],
-                )
-                anomaly_c = float(sst_value - baseline_c)
-                if "(future_fixed_window)" in baseline_source:
-                    future_fixed_window_count += 1
+            member_ssta_list = []
+            if member_files:
+                log("Computing SSTA for each ensemble member...")
+                for member_file in member_files:
+                    with xr.open_dataset(member_file) as member_ds:
+                        member_sst = member_ds["tos"]
+                        member_ssta = compute_ssta_from_climatology(member_sst, clim_ds, start_month)
+                        member_ssta_list.append(member_ssta)
+
+                member_ssta_array = np.array(member_ssta_list)
+                mme_ssta = np.mean(member_ssta_array, axis=0)
+                spread_std = np.std(member_ssta_array, axis=0)
+
+                log("Using MME SSTA computed from ensemble members")
+                ssta_values = mme_ssta
+            else:
+                log("Computing SSTA from single MME file...")
+                ssta_values = compute_ssta_from_climatology(sst, clim_ds, start_month)
+
+            monthly_anomalies: list[MonthlyAnomaly] = []
+            for t, (timestamp, sst_val, anom_val) in enumerate(
+                zip(nino34_sst.time.values, nino34_values, ssta_values)
+            ):
+                baseline_val = float(sst_val - anom_val)
                 monthly_anomalies.append(
                     MonthlyAnomaly(
                         month=to_month(timestamp),
-                        sst_c=float(sst_value),
-                        baseline_c=float(baseline_c),
-                        anomaly_c=anomaly_c,
-                        baseline_source=baseline_source,
+                        sst_c=float(sst_val),
+                        baseline_c=baseline_val,
+                        anomaly_c=float(anom_val),
+                        baseline_source=f"climatology:lead_{t}_month_{start_month}",
                     )
                 )
 
             anomaly_values = np.asarray([item.anomaly_c for item in monthly_anomalies], dtype=float)
+
             plt.figure(figsize=(10, 6))
-            plt.plot(
-                nino34_sst["time"].values,
-                anomaly_values,
-                marker="o",
-                label="Nino 3.4 SSTA",
-            )
+            if member_files:
+                for i, member_ssta in enumerate(member_ssta_list):
+                    plt.plot(
+                        nino34_sst["time"].values,
+                        member_ssta,
+                        color="gray",
+                        alpha=0.3,
+                        linewidth=1,
+                        label="Member" if i == 0 else None,
+                    )
+                plt.plot(
+                    nino34_sst["time"].values,
+                    ssta_values,
+                    color="black",
+                    linewidth=2.5,
+                    marker="s",
+                    label="MME",
+                )
+            else:
+                plt.plot(
+                    nino34_sst["time"].values,
+                    ssta_values,
+                    marker="o",
+                    label="Nino 3.4 SSTA",
+                )
+
+            plt.axhline(y=0, color="k", linestyle="--", alpha=0.3)
             plt.title("Nino 3.4 SSTA Prediction")
             plt.xlabel("Date")
             plt.ylabel("SSTA (°C)")
@@ -356,7 +357,6 @@ def analyze(input_file: Path, output_dir: Path) -> None:
                 f"Min Monthly Anomaly: {anomaly_values[min_anom_idx]:.2f} C at "
                 f"{monthly_anomalies[min_anom_idx].month}"
             )
-            log(f"Future fixed-window baseline months: {future_fixed_window_count}")
 
             oni_seasons = build_oni_seasons(monthly_anomalies)
             oni_events = build_oni_events(oni_seasons)
@@ -421,13 +421,8 @@ def analyze(input_file: Path, output_dir: Path) -> None:
                     "max_month": max_month,
                     "min_sst_c": round(min_sst, 2),
                     "min_month": min_month,
-                    "cpc_snapshot_path": str(CPC_SNAPSHOT_PATH),
-                    "baseline_note": "Past-30-year monthly mean from CPC TOTAL column",
-                    "baseline_window_years": ROLLING_BASELINE_YEARS,
-                    "cpc_data_year_range": {
-                        "start_year": cpc_min_year,
-                        "end_year": cpc_max_year,
-                    },
+                    "clim_file": str(CLIM_PATH),
+                    "baseline_note": "ORCA climatology (1980-2022) by lead time and month",
                 },
                 "nino34_anomaly_monthly": [
                     {
@@ -467,6 +462,14 @@ def analyze(input_file: Path, output_dir: Path) -> None:
                     "max_mps": round(max_speed_value, 3),
                 },
             }
+
+            if member_files:
+                summary_payload["ensemble_members"] = {
+                    "count": len(member_files),
+                    "member_ssta": [m.tolist() for m in member_ssta_list],
+                    "mme_ssta": ssta_values.tolist(),
+                    "spread_std": spread_std.tolist(),
+                }
 
             stats_json_path.write_text(
                 json.dumps(summary_payload, ensure_ascii=False, indent=2) + "\n",

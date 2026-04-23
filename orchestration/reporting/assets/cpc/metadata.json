@@ -1,5 +1,0 @@
-{
-  "source_url": "https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/ensostuff/detrend.nino34.ascii.txt",
-  "fetched_at_utc": "2026-04-21T04:03:41.383477+00:00",
-  "description": "Local CPC Niño3.4 monthly snapshot used by analyzer.py for TOTAL-based past-30-year baseline"
-}

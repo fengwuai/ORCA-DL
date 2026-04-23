@@ -13,3 +13,4 @@ services:
       - ./output/reports:/app/output/reports
       - ./ckpt:/app/ckpt:ro
       - ./stat:/app/stat:ro
+      - ./clim:/app/clim:ro

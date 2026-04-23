@@ -175,6 +175,7 @@ def run_monthly_pipeline(
                     resolved_source,
                     "--output-dir",
                     str(temp_model_dir),
+                    "--save-member-preds",
                 ],
                 task_name="执行推理流程",
             )

@@ -233,6 +233,7 @@ def build_prompt(
    - 建议动作
    - 置信度（仅可用 高/中/低）
 8. 输出必须是纯 markdown，不要输出解释文字或代码块围栏。
+9. 输出必须是中文
 
 <template>
 {template_markdown}
