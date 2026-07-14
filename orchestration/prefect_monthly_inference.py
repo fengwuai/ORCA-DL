@@ -27,7 +27,7 @@ CRON = "0 2 20 * *"
 INFERENCE_CMD = ["pixi", "run", "-e", "model", "inference"]
 TMP_BASE_DIR = ROOT / "tmp"
 DEFAULT_REPORT_OUTPUT_DIR = "./output/reports"
-PIPELINE_WEBHOOK_URL = "https://www.feishu.cn/flow/api/trigger-webhook/b26f56b1d7fa73b40503900ce51e2bfe"
+PIPELINE_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/6fe98c8f-b335-46f6-ac00-7cb045ba8965"
 PUBLIC_REPORT_BASE_URL = "https://qx.app.xmschain.com/public/ocean_report"
 WEBHOOK_CONNECT_TIMEOUT_SECONDS = 5
 WEBHOOK_READ_TIMEOUT_SECONDS = 10
@@ -111,7 +111,10 @@ def build_public_report_url(target_month: str) -> str:
 
 def send_pipeline_notification(title: str, message: str) -> None:
     logger = resolve_logger()
-    payload = {"title": title, "message": message}
+    payload = {
+        "msg_type": "text",
+        "content": {"text": f"{title}\n{message}"},
+    }
     try:
         response = requests.post(
             PIPELINE_WEBHOOK_URL,
