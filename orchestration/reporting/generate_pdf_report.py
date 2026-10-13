@@ -25,7 +25,7 @@ REPORT_ASSETS_DIR = ROOT / "orchestration" / "reporting" / "assets"
 REPORT_TEMPLATE_PATH = REPORT_ASSETS_DIR / "report_template.md"
 REPORT_ANALYZER_PATH = REPORT_ASSETS_DIR / "analyzer.py"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-ARK_MODEL_NAME = "doubao-seed-2-0-lite-260215"
+ARK_MODEL_NAME = "doubao-seed-2-1-lite-260915"
 PDF_MARGIN = "16mm"
 PDF_FONT_CANDIDATES = (
     "Noto Sans CJK SC",
